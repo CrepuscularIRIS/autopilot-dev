@@ -1,16 +1,12 @@
 ---
-name: 任务
-about: PLAN 里的一条任务（看板一张卡）
-title: "T-xx <一句话>"
+name: 需求
+about: 用户原话，进 work/<slug>/BRIEF.md 由 manager 打磨
+title: "<slug> <一句话>"
 labels: task
 ---
 
-- slug：`<slug>`　PLAN 行：`work/<slug>/PLAN.md#<T-xx>`
-- owner：builder / frontend-dev / scout
-- 区域：<…>
-- deps：<…>
-- review：S / M / L / GU / –
-- 捷径：<…>
+## 原话
+<用户原话，不改写>
 
-## 验收（PLAN 原文，不改写）
-<…>
+## 背景（可选）
+<相关文件、截图、参考链接>
