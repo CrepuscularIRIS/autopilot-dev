@@ -1,6 +1,6 @@
 # CLAUDE.md · 项目主控文件
 
-`<项目名>`。用 `<语言>` 交流。**人主导**：需求、取舍、节奏由人定。接手先读 `work/HANDOFF.md`。
+`<项目名>` · 无人值守开发。用 `<语言>` 交流。人随手扔需求、偶尔在 `work/QUESTIONS.md` 拍板；其余由本文件的四个角色自己补全需求、开发、测试、调试、验收，一直推进。接手先读 `work/HANDOFF.md`。
 
 > 本文件同时是所有角色的边界文件（subagent 启动时也会读到它）。`<…>` 处由项目负责人填写，填不了的写「待定」并在 `work/QUESTIONS.md` 开一个问题。
 
@@ -36,8 +36,8 @@
 状态全在文件里：需求 `work/<slug>/BRIEF.md`；工单 `work/tickets/{open,doing,done,blocked,dropped}/`，顺序 `work/tickets/queue.md`，回执与审查报告 `work/tickets/receipts/`，模板 `work/tickets/_templates/`。
 
 1. **需求进文件**：用户提出需求或改需求，主 agent 只做一件事——把**原话 + 日期**追加到 `work/<slug>/BRIEF.md` 的「用户原话」节（新需求先 `cp -r work/_template work/<slug>`），然后派 `manager`。主 agent 不自己理解需求、不直接开写代码。
-2. **立项（manager 任务 A）**：manager 打磨需求（目标、DONE 条款、非目标、待拍板问题）、定方案、写工单进 `open/`、排 `queue.md`；要人拍板的写进 `QUESTIONS.md`。之后需求变了也是 manager 改 BRIEF 和工单。纯机械小改（改一行配置）主 agent 可直接按模板写单，跳过这步。
-3. **施工（主 agent）**：工单挪 `doing/`、填 `claimed`；在单的分支上先写失败测试看它红，再最小实现到绿；写回执 `receipts/T<N>.receipt.md`，贴原样命令与输出。
+2. **立项（manager 任务 A）**：manager 补全需求——先查社区、竞品、在维护的上游，再写目标、DONE 条款、非目标、待拍板问题——、定方案、写工单进 `open/`、排 `queue.md`；要人拍板的写进 `QUESTIONS.md`。之后需求变了也是 manager 改 BRIEF 和工单。纯机械小改（改一行配置）主 agent 可直接按模板写单，跳过这步。
+3. **施工（主 agent）**：工单挪 `doing/`、填 `claimed`；在单的分支上先写失败测试看它红，再最小实现到绿；红了或行为不对先复现、找根因再修，不猜着改；写回执 `receipts/T<N>.receipt.md`，贴原样命令与输出。
 4. **验收 + 审查（reviewer）**：一批（约 3～6 张）或任何安全 / 协议 / 存储 / 鉴权单施工完，派 `reviewer`，给工单、回执和 commit 区间。它重跑验收、审 diff，报告里每张单给 PASS / FAIL。
 5. **裁决**：
    - 全部 PASS 且没有「高 / 中」意见 → 主 agent 按报告把单挪 `done/`，工单头写 `accepted: <日期> <HEAD> 依据 <报告路径>`。
@@ -49,7 +49,7 @@
 
 **控上下文**：额度主要耗在「请求次数 × 上下文大小」。按需读片段、测试输出只看尾部；长测试 `run_in_background` 跑一次等通知，不轮询；不建定时巡检。
 
-**问人的边界**：只问需求与范围、品味偏好、越过 §5 硬约束的授权。问题进 `QUESTIONS.md`，只阻塞依赖它的单，其余照常推进。
+**问人的边界**：只问需求与范围、品味偏好、越过 §5 硬约束的授权。问题进 `QUESTIONS.md` 附推荐项；**不停工**——可逆的按推荐项先推进（人事后可推翻），不可逆或越过硬约束的只阻塞依赖它的单。
 
 ## 4. 方法论
 
