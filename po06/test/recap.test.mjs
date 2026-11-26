@@ -1,0 +1,257 @@
+// P7 · 运行回顾脚本（`scripts/recap.mjs`）的单测。
+//
+// 运行：node po06/test/recap.test.mjs
+//
+// 为什么给它配单测（EV-0116）：它是**用户唯一会读的那一页**——
+// 真实项目跑完之后，"它到底有没有参与""它替我说了什么"都从这一页看。
+// 而它最关键的两条判读恰好是**安全性质**的：
+//   ① 条目必须分清"你说过"与"机器补充"（0.6 的立身主张就是**不冒充用户**）；
+//   ② 无出处的条目必须是**缺陷**（退出码非零），不能只在正文里小声提一句。
+// 判据写错会让用户看到一页"看起来很干净"的假象——所以用 fixture 钉住。
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
+import { readFileSync as readFileSyncTop } from 'node:fs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SCRIPT = join(HERE, '..', 'scripts', 'recap.mjs')
+
+let pass = 0
+const failures = []
+function ok(c, what) { if (!c) throw new Error(what || 'expected truthy') }
+function eq(a, b, what) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${what || 'value'}: expected ${y}, got ${x}`) }
+function t(name, fn) { try { fn(); pass += 1 } catch (e) { failures.push({ name, error: String(e.message || e) }) } }
+
+const DIRS = []
+process.on('exit', () => { for (const d of DIRS) { try { rmSync(d, { recursive: true, force: true }) } catch { /* best effort */ } } })
+
+const rec = (over) => JSON.stringify({
+  at: '2026-09-21T10:00:00.000Z', sessionId: 'session-aaaa1111', messageId: 'm1',
+  chars: 40, trigger: 'user-message', ok: true, outcome: 'committed',
+  provider: 'p', model: 'm', ms: 1000, packetChars: 300, revision: 2, trace: ['a', 'b'], ...over,
+})
+const state = (items, over = {}) => JSON.stringify({
+  schemaVersion: 1, sessionId: 'session-aaaa1111', taskId: 't', revision: 2,
+  lastInputRevision: 2, sourceMessageIds: ['m1'], phase: 'idle', items,
+  questions: [], artifactRefs: [], verificationRefs: [], ...over,
+})
+const item = (kind, text, refKind, refSessionId = 'session-aaaa1111') => ({
+  id: 'i' + Math.random().toString(36).slice(2, 6), kind, status: 'active', scope: 'task', text,
+  sourceRefs: refKind ? [{ kind: refKind, sessionId: refSessionId, messageId: 'm1' }] : [],
+  appliesTo: [], supersedes: [], dependsOn: [],
+})
+
+/** 建一个假 home 并跑回顾脚本。
+ *  `profiles`：要假装装了 0.6 的 profile 名（会在其 node_modules 下建包目录）；
+ *  `enableConfig`：`<home>/po06.json` 的内容（字符串；不给则不创建）。 */
+function run({ wire = [], states = {}, jsonOut = false, profiles = [], bareProfiles = [], enableConfig = null } = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'po06-recap-'))
+  DIRS.push(home)
+  if (wire !== null) writeFileSync(join(home, 'po06-wire.jsonl'), wire.join('\n') + '\n', 'utf8')
+  if (states !== null) {
+    mkdirSync(join(home, 'po06-state'), { recursive: true })
+    for (const [name, body] of Object.entries(states)) writeFileSync(join(home, 'po06-state', name), body, 'utf8')
+  }
+  for (const p of profiles) {
+    mkdirSync(join(home, 'profiles', p, 'node_modules', '@dsh-external', 'dsh-wish-specializer'), { recursive: true })
+  }
+  // 建了 profile 但**没装**这个包（真实情形：用户照 README 建了 profile，装包那步还没做/失败了）
+  for (const p of bareProfiles) mkdirSync(join(home, 'profiles', p), { recursive: true })
+  if (enableConfig !== null) writeFileSync(join(home, 'po06.json'), enableConfig, 'utf8')
+  const args = [SCRIPT, '--home', home]
+  const outJson = join(home, 'recap.json')
+  if (jsonOut) args.push('--json', outJson)
+  try {
+    const stdout = execFileSync(process.execPath, args, { encoding: 'utf8' })
+    return { exit: 0, stdout, home, outJson }
+  } catch (e) {
+    return { exit: e.status, stdout: String(e.stdout || ''), home, outJson }
+  }
+}
+
+// ── ① 正常一轮：分清"你说过"与"机器补充" ─────────────────────────────
+t('条目按出处分流：你说过 / 机器补充 / 无出处', () => {
+  const r = run({
+    wire: [rec({}), rec({ sessionId: 'session-bbbb2222', outcome: 'skipped', ok: false, reason: '没启用' })],
+    states: {
+      'session-aaaa1111.json': state([
+        item('user_requirement', '输出只有一行', 'human'),
+        item('unknown', '未指定的取舍', 'model'),
+      ]),
+    },
+  })
+  ok(r.stdout.includes('**合计**：来自你的话 **1** 条 ｜ 机器补充 **1** 条 ｜ 无出处 **0** 条'),
+    '合计行不对：\n' + r.stdout)
+  ok(r.stdout.includes('你说过') && r.stdout.includes('机器补充'), '明细应标注来源')
+  ok(r.stdout.includes('committed×1') && r.stdout.includes('skipped×1'), '判定结果应逐类计数：\n' + r.stdout)
+  ok(r.stdout.includes('没有正常提交的轮次'), '未提交的轮次要单列（EV-0078 的解药）')
+  eq(r.exit, 0, '正常数据不该退出非零；输出：\n' + r.stdout)
+})
+
+// ── ② 无出处条目 ⇒ **必须**非零（安全性质，不是排版问题）────────────────
+t('无出处条目 ⇒ 非零退出 + 明确警告（不许只是小声提一句）', () => {
+  const r = run({
+    wire: [rec({})],
+    states: { 'session-aaaa1111.json': state([item('user_requirement', '凭空冒出来的一条', null)]) },
+  })
+  eq(r.exit, 1, '无出处条目必须是失败；输出：\n' + r.stdout)
+  ok(r.stdout.includes('无出处'), '应出现"无出处"字样：\n' + r.stdout)
+  ok(r.stdout.includes('没有出处'), '警告里应说清是"没有出处"：\n' + r.stdout)
+})
+
+// ── ③ 台账坏行 ⇒ 警告 + 非零（静默吞掉坏数据是不可接受的）───────────────
+t('台账里有坏行 ⇒ 警告且非零退出（不静默吞掉）', () => {
+  const r = run({ wire: [rec({}), '{这不是 JSON'], states: null })
+  eq(r.exit, 1, '坏行应导致非零；输出：\n' + r.stdout)
+  ok(/无法解析/.test(r.stdout), '应报"无法解析"：\n' + r.stdout)
+})
+
+// ── ⑥ 分叉继承：单独成节，且**不得**污染逐轮统计 ──────────────────────
+t('分叉继承记录单独成节，不计入逐轮统计（回归：曾把包字符均值拉低）', () => {
+  const r = run({
+    wire: [
+      rec({ packetChars: 300, ms: 2000 }),
+      rec({ trigger: 'fork-inherit', sessionId: 'session-child', inheritedFrom: 'session-aaaa1111', revision: 4, chars: undefined, packetChars: undefined, ms: undefined, outcome: undefined, ok: true }),
+    ],
+    states: null,
+  })
+  ok(r.stdout.includes('分叉继承（1 次）'), '应有分叉继承小节：\n' + r.stdout)
+  // 表里用的是**短 id**（`session-` 前缀会被去掉）——断言要照实际输出写，不能照我以为的写
+  ok(/\| `child` \| `aaaa1111` \| 4 \|/.test(r.stdout), '应写出子会话 / 继承自 / 版本：\n' + r.stdout)
+  ok(r.stdout.includes('说明继承**没发生**'), '没有行时要能说清后果（否则"没继承"会被读成"没分叉"）：\n' + r.stdout)
+  // 逐轮统计必须只算 1 轮、均值不被 0 拉低
+  ok(r.stdout.includes('**1 个会话 / 1 轮输入**'), '逐轮统计只应算 1 轮：\n' + r.stdout)
+  ok(r.stdout.includes('平均 300 字符'), '包字符均值应是 300（不被分叉记录拉低）：\n' + r.stdout)
+  ok(!/没有正常提交的轮次/.test(r.stdout), '分叉继承**不是**失败轮次，不得出现在失败清单里')
+})
+
+// ── ⑦ 什么都没跑过 ⇒ 说明而不是失败（"没跑过"不等于"出错"）──────────────
+t('没跑过（两个文件都不存在）⇒ 给说明，退出码 0', () => {
+  const r = run({ wire: null, states: null })
+  eq(r.exit, 0, '不该把"没跑过"判成失败；输出：\n' + r.stdout)
+  // 措辞在 EV-0134 之后更精确了（分三种情况）；这里只钉住"**必须给出可区分、可归因的理由**"，
+  // 不钉具体句子——否则每次把话说得更清楚都要改这条测试，而它想守的不是那句话。
+  ok(r.stdout.includes('没有装 0.6') || r.stdout.includes('启用没生效') || r.stdout.includes('还没有任何一次真实触发'),
+    '理由必须落在可区分的那三种之一：\n' + r.stdout)
+  ok(r.stdout.includes('没有找到 `po06-wire.jsonl`'), '仍要说明台账不存在：\n' + r.stdout)
+})
+
+// ── ⑤ --json 可供机器读 ──────────────────────────────────────────────
+t('--json 输出结构化结果（会话/条目/问题计数）', () => {
+  const r = run({
+    wire: [rec({}), rec({ revision: 3 })],
+    states: { 'session-aaaa1111.json': state([item('user_requirement', 'x', 'human')], { revision: 3, questions: [{ text: 'q' }] }) },
+    jsonOut: true,
+  })
+  const j = JSON.parse(readFileSyncTop(r.outJson, 'utf8'))
+  eq(j.wire.records, 2, '台账条数')
+  eq(j.wire.outcomes.committed, 2, '按结果分类')
+  eq(j.sessions[0].items, 1, '条目数')
+  eq(j.sessions[0].questions, 1, '问题数')
+  eq(j.state.sessions, 1, '会话数')
+})
+
+// ── ⑧ 跨会话隔离：出处必须落在**自己或祖先**的会话里 ─────────────────────
+t('跨会话串味：条目引用了链外会话的话 ⇒ 报红 + 非零退出', () => {
+  const foreign = item('user_requirement', '这句话其实来自另一个会话', 'human')
+  foreign.sourceRefs = [{ kind: 'human', sessionId: 'session-zzzz9999', messageId: 'm9' }]
+  const r = run({
+    wire: [rec({})],
+    states: { 'session-aaaa1111.json': state([foreign]) },
+  })
+  eq(r.exit, 1, '跨会话串味必须非零；输出：\n' + r.stdout)
+  ok(r.stdout.includes('跨会话隔离'), '应报隔离结论：\n' + r.stdout)
+  ok(r.stdout.includes('链外'), '应说清是"链外会话"：\n' + r.stdout)
+  ok(r.stdout.includes('zzzz9999'), '应点名那个外部会话：\n' + r.stdout)
+})
+
+// ⚠ **假警报守卫**：分叉的子会话**合法地**继承父会话的条目，那些条目的出处指向父会话是**对的**。
+// 判据若写成"出处必须等于自己"，就会把合法继承全判成泄漏——本项目吃过好几次
+// "判据分不清两种情况"的亏（EV-0107 / 0108 / 0113），所以这里专门钉住。
+t('继承的条目指向**父会话**不算串味（假警报守卫）', () => {
+  const inheritedItem = item('user_requirement', '这句话是你在父会话里说的', 'human')
+  inheritedItem.sourceRefs = [{ kind: 'human', sessionId: 'session-parent01', messageId: 'mp' }]
+  const r = run({
+    wire: [rec({ sessionId: 'session-child001' })],
+    states: {
+      'session-parent01.json': state([item('user_requirement', '父会话自己的话', 'human', 'session-parent01')], { sessionId: 'session-parent01' }),
+      'session-child001.json': state([inheritedItem], {
+        sessionId: 'session-child001', inheritedFrom: 'session-parent01',
+      }),
+    },
+  })
+  eq(r.exit, 0, '继承来的条目不该被当成串味；输出：\n' + r.stdout)
+  ok(/跨会话隔离\*\*：✅/.test(r.stdout), '应报隔离 ✅：\n' + r.stdout)
+  ok(!/跨会话串味/.test(r.stdout), '不得出现串味小节：\n' + r.stdout)
+})
+
+t('自引用（出处指向自己）不算串味', () => {
+  const r = run({ wire: [rec({})], states: { 'session-aaaa1111.json': state([item('user_requirement', 'x', 'human')]) } })
+  eq(r.exit, 0, '自引用正常；输出：\n' + r.stdout)
+  ok(/跨会话隔离\*\*：✅/.test(r.stdout), '应报 ✅：\n' + r.stdout)
+})
+
+// ── ⑨ 读不出来的状态文件：必须让用户看见（EV-0122）──────────────────────
+t('状态文件读不出来 ⇒ 单独成节 + 非零退出（不许读成"本来就没约束"）', () => {
+  const r = run({
+    wire: [
+      rec({}),
+      rec({ trigger: 'state-unreadable', sessionId: 'session-bad0001', ok: false, outcome: undefined,
+        reason: 'malformed-json', path: 'X:/po06-state/session-bad0001.json',
+        quarantined: 'X:/po06-state/session-bad0001.corrupt-123.json' }),
+    ],
+    states: null,
+  })
+  eq(r.exit, 1, '状态丢失必须是警告（非零）；输出：\n' + r.stdout)
+  ok(r.stdout.includes('读不出来的状态文件'), '应有专门小节：\n' + r.stdout)
+  ok(r.stdout.includes('malformed-json'), '应写出具体原因：\n' + r.stdout)
+  ok(r.stdout.includes('.corrupt-123.json'), '应给出残骸文件名：\n' + r.stdout)
+  ok(r.stdout.includes('绝不静默覆盖'), '应说明 0.6 的处理方式：\n' + r.stdout)
+  // 不得被算成"一轮输入"（它没有 chars/packetChars）
+  ok(r.stdout.includes('**1 个会话 / 1 轮输入**'), '逐轮统计只应算 1 轮：\n' + r.stdout)
+})
+
+// ── ⑨ 没台账时，要说清**是三种情况里的哪一种**（EV-0134）──────────────
+// 这一页是用户装好 beta 后第一眼看到的东西；原来只有"要么没启用，要么装到了别的 home"，
+// 漏了"装了、启用了、只是还没用过"——而那正是**刚装好第一次看**的默认情形。
+t('没台账：home 里没装 0.6 ⇒ 明说"没装"并指向装法', () => {
+  const r = run({ wire: null, states: null, bareProfiles: ['po06beta'] })  // profile 建了、包没装
+  ok(r.stdout.includes('没有装 0.6'), '应明说没装（profile 存在≠包装上了）：\n' + r.stdout)
+  ok(r.stdout.includes('po06/README.md'), '应指向装法：\n' + r.stdout)
+  eq(r.exit, 0, '没装不是错误，退出码应为 0（否则用户会以为坏了）')
+})
+
+t('没台账：装了 + 配置启用 ⇒ 明说"还没被触发过"，不许说成装错了地方', () => {
+  const r = run({
+    wire: null, states: null,
+    profiles: ['po06beta'],
+    enableConfig: JSON.stringify({ settingsVersion: 1, enabled: true, rollout: { mode: 'all' } }),
+  })
+  ok(r.stdout.includes('还没有任何一次真实触发'), '应说清是"还没用过"：\n' + r.stdout)
+  ok(r.stdout.includes('po06beta'), '应点名是哪个 profile：\n' + r.stdout)
+  ok(!r.stdout.includes('装到了别的 home'), '不得再暗示"装错地方"：\n' + r.stdout)
+  eq(r.exit, 0, '退出码 0')
+})
+
+t('没台账：装了但启用没生效 ⇒ 指出配置原因（保守默认不启用）', () => {
+  const r = run({ wire: null, states: null, profiles: ['po06beta'] })  // 没有 po06.json
+  ok(r.stdout.includes('启用没生效'), '应说明启用没生效：\n' + r.stdout)
+  ok(r.stdout.includes('没有 `po06.json`'), '应指出缺配置文件：\n' + r.stdout)
+  ok(r.stdout.includes('默认**不启用**'), '应说明默认不启用：\n' + r.stdout)
+
+  // 旧插件写的配置（无 settingsVersion）同样要被认出来，而不是笼统说"没启用"
+  const r2 = run({
+    wire: null, states: null, profiles: ['po06beta'],
+    enableConfig: JSON.stringify({ enabled: true }),
+  })
+  ok(r2.stdout.includes('not-a-0.6-config'), '应写出具体原因（不是 0.6 的配置）：\n' + r2.stdout)
+})
+
+const total = pass + failures.length
+console.log(JSON.stringify({
+  suite: 'po06-recap', phase: 'P7', total, pass, fail: failures.length, failures,
+  note: '用假 home 跑回顾脚本：出处分流、无出处必须非零、坏行不静默、没跑过不算失败、--json 可机器读。不调模型。',
+}, null, 2))
+process.exit(failures.length === 0 ? 0 : 1)

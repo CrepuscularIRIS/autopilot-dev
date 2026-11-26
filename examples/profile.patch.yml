@@ -1,0 +1,26 @@
+# Example override for the existing dsh-wish-specializer loader entry.
+# Add or merge this patch into your profile cordis.patch.yml; do not insert a duplicate.
+# Replace model IDs and providers with models already configured in your DSH.
+- id: dsh-wish-specializer
+  name: "@dsh-external/dsh-wish-specializer"
+  config:
+    interpreter:
+      provider: litellm
+      model: deepseek-v4.1-flash
+    advisorModels:
+      advisor:
+        provider: litellm
+        model: deepseek-v4.1-flash
+        reasoningEffort: high
+      worker:
+        provider: litellm
+        model: 'glm-5.4[1m]'
+        reasoningEffort: high
+      investigate:
+        provider: litellm
+        model: k3.1-pro
+        reasoningEffort: high
+      review:
+        provider: litellm
+        model: gpt-6.2-sol
+        reasoningEffort: high

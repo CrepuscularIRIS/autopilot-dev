@@ -1,41 +1,63 @@
-# Autopilot Dev · 无人值守开发模板
+# Autopilot Dev · DSH 许愿式开发
 
-> Drop in a one-line requirement; the setup researches it, turns it into a professional spec, builds it test-first, verifies it with an independent reviewer, and keeps going without you.
+把一句需求变成有边界、可执行、可验证的任务。在 DSH 原生 **PTC Mode** 中使用，不需要额外的 Wish 模式，也不切换主会话模型。
 
-**随手扔一句需求，剩下的它自己补全**：查社区与上游、把需求打磨成专业的规格、拆成工单、先写测试再实现、自己调试、交给另一家模型验收审查，一直推进到交付。人只在 `work/QUESTIONS.md` 里偶尔拍板，不答也不停工。
+基于 [Wish Specializer](https://github.com/WestFox-AwA/dsh-wish-specializer) 的 BSD-3-Clause 开源实现，增加 Semantic Anchors（关键词提示词）、Worker ↔ Advisor 协作与证据驱动工作流。本仓库只包含通用工程模式，不包含科研流水线、个人环境或模型服务密钥。
 
-## 怎么用
+## 工作方式
 
-1. **Use this template** 建仓。
-2. 填 `CLAUDE.md` 里的 `<…>`（目标、测试命令、沙箱目录、外部动作授权），在 `.claude/agents/*.md` 的 `model:` 填模型。
-3. 对主会话说一句需求，比如「加个导出 PDF」。然后去忙别的。
+1. **Intent Alignment**：发送前补全意图、隐含约束与质量方向；原话不改写，补全包独立注入。
+2. **Intent Elaboration**：非平凡任务轻量摸底后，先问 Advisor 如何实现，再由 Worker 制定方案。低风险小修直接做。
+3. **Execution**：Karpathy 四原则 + Ponytail；连续失败时 Stop-the-Line，用 Systematic Debugging 寻找根因。
+4. **Quality Calibration**：Worker 执行真实测试并检查结果；完整代码变更就绪后，按需发起一次独立只读审查；对照证据修复、重测。
+5. **Goal**：原生长程 Goal 按目标、里程碑、证据与停止条件推进；Advisor 建议不能自行改写 Goal 或宣称完成。
 
-## 它会自己做什么
+普通咨询使用直接模型调用，不启动子代理。复杂调查和最终代码 Review 使用独立上下文，以真实源码、Git 与可定位证据为准。阶段台账只在实际存在阶段依赖时使用。
 
-| 阶段 | 谁 | 做什么 |
+## 安装
+
+要求：支持 PTC、bundle patch、原生 subagent 的 DSH 版本，以及 Node.js（开发和打包建议 22+）。先在独立 profile 试用。
+
+```bash
+git clone https://github.com/CrepuscularIRIS/autopilot-dev.git
+cd autopilot-dev
+npm pack --ignore-scripts
+dsh plugin --profile desktop add "$(pwd)/dsh-external-dsh-wish-specializer-0.9.1-autopilot.1.tgz"
+```
+
+或使用 [Releases](https://github.com/CrepuscularIRIS/autopilot-dev/releases) 的同版本 .tgz。安装后重启 DSH Desktop，在新的会话选择 **PTC Mode**，在 Options 中开启许愿特化（High 或 Ultra）。启用顾问与只读工具；首次可用简单技术任务检查注入卡片。
+
+包名保留 `@dsh-external/dsh-wish-specializer` 以兼容既有 bundle 和 UI；它是替换原版的 fork，**不能与原版同装于一个 profile**。如已有该包，请先核对所选 profile，移除旧包或使用新的 profile。Ponytail / Superpowers 的关键规则已集成，可按需关闭重复插件；不会自动修改其它插件。
+
+## 模型配置
+
+四个角色是路由而不是固定模型。无角色配置时，使用当前会话的模型；独立审查仍使用新的只读子代理上下文。DSH Options 的模型选项只控制发送前解释层（默认跟随会话），不会改主模型或其它角色。
+
+| 角色 | 可选的四模型方案 | 触发 |
 |---|---|---|
-| 补全需求 | manager | 查社区、竞品、在维护的上游，把一句话扩成 BRIEF：目标、用户旅程、可证伪的 DONE 条款、非目标、方案 |
-| 拆单 | manager | 一单一事，验收写成命令 |
-| 开发 | 主 agent | 先写失败测试 → 实现 → 遇到问题先找根因再修 → 写回执 |
-| 验收 + 审查 | reviewer（另一家模型） | 亲手重跑验收、审 diff，每单 PASS / FAIL |
-| 裁决 / 重规划 | manager | 审查意见逐条核实；失败两次换路线 |
-| 逆向 | reverse-engineer | 行为只在闭源产物里时才派 |
-| 交付 | 主 agent + manager | 合并、回测、阶段报告、更新交接文件 |
+| Worker | GLM 5.4 1M | 主会话执行、图像与阶段证据核验 |
+| Advisor | DeepSeek V4.1 Flash | 默认咨询、Plan 前校准、排错 |
+| Investigator | K3.1 Pro | 根因不明或恢复路径难选，独立调查 |
+| Reviewer | GPT-6.2 Sol | 完整任务交付前一次独立代码审查 |
 
-要人拍板的事写进 `QUESTIONS.md` 并附推荐项；无人值守时 manager **按推荐项先推进**，人事后可推翻。
+[示例 profile 配置](examples/profile.patch.yml) 中提供可编辑 provider/model 及 reasoningEffort。将示例的 `config` 合并到该包实际生效的 bundle entry 或 profile 覆盖层；不要再次插入同名 entry。模型 ID 必须与你在 DSH 配置的 provider 一致。没有 LiteLLM 也能使用其它 DSH provider，插件不自带 API 服务、不设置密钥。图像能力取决于模型自身。
 
-## 目录
-
-```
-CLAUDE.md               唯一主控文件：边界、角色、流程、硬约束
-.claude/agents/         manager / reviewer / reverse-engineer 三张角色卡
-work/HANDOFF.md         接手入口
-work/<slug>/BRIEF.md    需求（用户原话 + manager 补全）
-work/tickets/           工单（所在目录即状态）、回执、审查报告、队列、模板
-work/QUESTIONS.md  LEARNINGS.md  LOG.md
+在 PTC 中：
+```js
+return await tools.consult_task({question:"根据当前证据，真实目标、最短路线和可测 DoD 是什么？"})
 ```
 
-工单制改编自 [yanauto/opus-manager](https://github.com/yanauto/opus-manager)。
+更多：[协作规范](po06/ADVISOR.md) · [关键词语义锚点](docs/KEYWORDS.md) · [Worker 规则目录](po06/playbooks/) · [English](README.en.md)
+
+## 验证 / 开发
+
+```bash
+npm test
+npm run pack:check
+```
+
+源码测试为本地回归，不代表所有模型或系统实测质量。Windows 可选 Shell 需要系统 Bash/Git for Windows/MSYS2；本 fork 不分发第三方二进制运行时。DSH 的原生工具、权限与工作区配置仍由宿主控制。
 
 ## License
-MIT
+
+BSD-3-Clause，保留原作者版权。集成的 Ponytail 与 Superpowers 摘录按 MIT 许可保留出处及许可；见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

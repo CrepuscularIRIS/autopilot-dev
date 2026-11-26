@@ -1,0 +1,74 @@
+{
+  "name": "@dsh-external/dsh-wish-specializer",
+  "version": "0.9.1-autopilot.1",
+  "private": true,
+  "description": "Autopilot Dev — Wish-driven intent alignment and evidence-based Worker ↔ Advisor workflow for DSH PTC.",
+  "type": "module",
+  "main": "./po06/lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./po06/lib/index.js"
+    },
+    "./client": {
+      "default": "./po06/lib/client.js"
+    },
+    "./check": {
+      "default": "./po06/lib/wish-check.js"
+    },
+    "./cordis.patch.yml": "./po06/cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "cordis": ">=4.0.0-rc <5"
+  },
+  "peerDependenciesMeta": {
+    "cordis": {
+      "optional": true
+    }
+  },
+  "files": [
+    "po06/lib",
+    "po06/playbooks",
+    "po06/runtime",
+    "po06/cordis.patch.yml",
+    "po06/README.md",
+    "po06/HELP-0.6.md",
+    "po06/HELP-0.6.en.md",
+    "po06/eval/HOLDOUT-v2.md",
+    "po06/eval/HOLDOUT-v1.md",
+    "po06/ADVISOR.md",
+    "docs/KEYWORDS.md",
+    "examples/profile.patch.yml",
+    "README.en.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./po06/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "immediately": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CrepuscularIRIS/autopilot-dev.git"
+  },
+  "homepage": "https://github.com/CrepuscularIRIS/autopilot-dev#readme",
+  "bugs": {
+    "url": "https://github.com/CrepuscularIRIS/autopilot-dev/issues"
+  },
+  "scripts": {
+    "test": "node po06/scripts/run-suites.mjs",
+    "pack:check": "npm pack --dry-run --ignore-scripts"
+  }
+}
