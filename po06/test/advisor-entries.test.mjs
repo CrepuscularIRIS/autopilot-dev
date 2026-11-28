@@ -30,9 +30,9 @@ test('参数：entry 可选、question 仍是必填', () => {
 
 test('顾问的措辞里带着两段式与禁施工图', () => {
   const sys = String(ADVISOR_SYSTEM)
-  assert.ok(sys.includes('BLUF'), '结论先行')
+  assert.ok(sys.includes('结论先行'), '结论先行')
   assert.ok(sys.includes('不写代码'), '禁代码')
-  assert.ok(sys.includes('Staff Engineer Review'), '独立顾问')
+  assert.ok(sys.includes('独立顾问'), '独立顾问')
 })
 
 test('six supervisory decisions map to legacy verdicts without granting unproved acceptance', async()=>{

@@ -26,7 +26,7 @@ test('registered improvement invokes the configured Flash route and never record
  assert.equal(out.reviewPassed, false); assert.equal(out.completionClaimAllowed, false); assert.equal(recorded, 0)
  assert.equal(out.model, 'deepseek-official/deepseek-flash'); assert.equal(input.reasoningEffort, 'max')
  // 2026-10-19 用户改口径：贡献改成"愿望式方向"（往上抬、一条一句、只有缺陷可稍具体）⇒ 修订号进一版。
- assert.equal(out.contributionRevision, 'route-a-3')
+ assert.equal(out.contributionRevision, 'route-a-4')
  assert.equal(finished.improvementAvailable, true); assert.equal(finished.reviewPassed, false)
  assert.equal(finished.disposition, 'quality-advice')
  const payload = JSON.parse(input.messages[0].content[0].text)
@@ -115,7 +115,7 @@ test('native English contribution uses no translation call or stronger route', a
 test('optimizer has one compact contract, preserves tier purposes and never forces item quotas', () => {
  for (const language of ['zh', 'en']) for (const tier of ['light', 'standard', 'heavy']) {
   const r = composeOptimizerSystem({ language, tier })
-  assert.equal(r.revision, 'intent-scout-wish-4'); assert.equal(r.parts.filter(p => p.key === 'format').length, 1)
+  assert.equal(r.revision, 'intent-scout-wish-5'); assert.equal(r.parts.filter(p => p.key === 'format').length, 1)
   assert.equal(r.parts.filter(p => p.key === 'tier').length, 1)
   assert.ok(r.text.includes(OPTIMIZER_TIERS[language][tier]))
   assert.doesNotMatch(r.text, /MAX_ITEMS|sourceRefs|最多.*条|At most.*items/)

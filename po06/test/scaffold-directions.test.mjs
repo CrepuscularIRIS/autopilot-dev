@@ -80,7 +80,7 @@ test('one shared 8000-token budget reaches policies, system and actual user mess
   const p=policyFor({tier});assert.equal(p.packetBudgetTokens,8000)
   for(const language of ['zh','en']){
    const system=protocol.composeOptimizerSystem({tier,language})
-   assert.equal(system.revision,'intent-scout-wish-4');assert.ok(system.text.includes('8000'))
+   assert.equal(system.revision,'intent-scout-wish-5');assert.ok(system.text.includes('8000'))
    assert.ok(system.text.includes('scaffold'));assert.ok(system.text.includes('ask_user_question'))
    assert.equal(system.parts.filter(x=>x.key==='guidance').length,1)
   }

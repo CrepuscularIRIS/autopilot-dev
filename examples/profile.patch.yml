@@ -4,6 +4,7 @@
 - id: dsh-wish-specializer
   name: "@dsh-external/dsh-wish-specializer"
   config:
+    metaSupervisor: true
     interpreter:
       provider: litellm
       model: deepseek-v4.1-flash
@@ -23,4 +24,4 @@
       review:
         provider: litellm
         model: gpt-6.2-sol
-        reasoningEffort: high
+        reasoningEffort: medium

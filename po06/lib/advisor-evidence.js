@@ -50,14 +50,14 @@ const sameRefs = (refs,bindings) => Array.isArray(refs) && refs.length <= 12 && 
 
 // Validate on save AND reload. Presence of malformed/newer claim metadata is not legacy.
 // This is deliberately independent of business status: a failed check always stays failed.
-export function claimEvidenceState(report) {
+export function claimEvidenceState(report, {maxChecks=8}={}) {
   const checks = Array.isArray(report?.checks) ? report.checks : []
   const present = report && Object.hasOwn(report,'evidenceAssessment') || checks.some(c=>c && Object.hasOwn(c,'evidenceBindings'))
   if (!present) return {policy:'legacy',complete:false,checks:[]}
   const invalid = () => ({policy:'invalid',complete:false,checks:[],reason:'claim-evidence-metadata-invalid'})
   const assessment = report?.evidenceAssessment
   if (!assessment || assessment.version !== 1 || assessment.source !== SOURCE || typeof assessment.visual !== 'boolean'
-    || typeof assessment.complete !== 'boolean' || !checks.length || checks.length > 8 || !Array.isArray(assessment.checks)
+    || typeof assessment.complete !== 'boolean' || !checks.length || checks.length > maxChecks || !Array.isArray(assessment.checks)
     || assessment.checks.length !== checks.length) return invalid()
   const result = []
   for (const [index,check] of checks.entries()) {
@@ -87,7 +87,7 @@ export function claimEvidenceState(report) {
 }
 
 /** Host evidence assessment, without IO or model calls. Caller partial/user-source barriers stay separate. */
-export function assessReviewEvidence(report, {materials=[],trace=[],resultIds=new Set(),visual=false,root,records=[]}={}) {
+export function assessReviewEvidence(report, {materials=[],trace=[],resultIds=new Set(),visual=false,root,records=[],maxChecks=8}={}) {
   // These fields are ALWAYS host-owned; model-authored exemptions cannot survive this call.
   if (!report || typeof report !== 'object' || Array.isArray(report)) report = {verdict:'unverified',checks:[]}
   delete report.evidenceAssessment
@@ -191,7 +191,7 @@ export function assessReviewEvidence(report, {materials=[],trace=[],resultIds=ne
   for (const [path,list] of reads) if (![...cited].some(ref=>ref.startsWith('read:') && evidencePathIdentity(ref.slice(5),root) === path)) {
     for (const row of list) if (row.resultAvailable !== true || row.evidence?.selectionComplete !== true) supplementalWarnings.push({path,status:row.evidence?.status || 'unavailable',reason:'uncited-read-limited',action:'supplemental-only'})
   }
-  const complete=checks.length > 0 && checks.length <= 8 && assessmentChecks.every(check=>check.complete)
+  const complete=checks.length > 0 && checks.length <= maxChecks && assessmentChecks.every(check=>check.complete)
   report.evidenceAssessment={version:1,source:SOURCE,visual:!!visual,complete,checks:assessmentChecks}
   if (report.verdict === 'pass' && (!complete || checks.some(check=>check.status !== 'satisfied'))) report.verdict=checks.some(check=>check.status === 'failed')?'gaps':'unverified'
   const seen = new Set(inputs.map(row=>JSON.stringify([row?.source,row?.path,row?.sha256,row?.startLine,row?.endLine])))

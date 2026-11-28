@@ -16,5 +16,6 @@
 - insert:
     - id: dsh-wish-specializer
       name: '@dsh-external/dsh-wish-specializer'
-      config: {}
+      config:
+        metaSupervisor: true
 

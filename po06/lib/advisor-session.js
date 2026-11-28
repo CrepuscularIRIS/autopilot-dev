@@ -48,7 +48,7 @@ export function createAdvisorWrapper({ ledger, policyFor, noteDirective }) {
         if (n > 0) withPrior = { ...out, priorConclusions: n }
       }
       try {
-        if (sid && out && out.ok === true) {
+        if (sid && out && out.ok === true && !out.finalReview) {
           if (out.mode !== 'review_result' && !out.partial && typeof out.directive === 'string' && out.directive) {
             noteDirective?.(sid, out.directive)
           }

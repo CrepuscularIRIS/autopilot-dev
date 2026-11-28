@@ -1,63 +1,50 @@
 # Autopilot Dev · DSH 许愿式开发
 
-把一句需求变成有边界、可执行、可验证的任务。在 DSH 原生 **PTC Mode** 中使用，不需要额外的 Wish 模式，也不切换主会话模型。
+基于 [Wish Specializer](https://github.com/WestFox-AwA/dsh-wish-specializer) 的 BSD-3-Clause 开源实现，在 **DSH 原生 PTC Mode** 内提供发送前意图补全、异步专业提议、长程 Goal 校准及独立终审。不需要新模式，不改写用户原话，也不切换主会话模型。
 
-基于 [Wish Specializer](https://github.com/WestFox-AwA/dsh-wish-specializer) 的 BSD-3-Clause 开源实现，增加 Semantic Anchors（关键词提示词）、Worker ↔ Advisor 协作与证据驱动工作流。本仓库只包含通用工程模式，不包含科研流水线、个人环境或模型服务密钥。
+## 四模型协作
 
-## 工作方式
+| 角色 | 示例模型 | 职责 |
+|---|---|---|
+| Worker | GLM 5.4 1M | 主会话、实现、测试、视觉证据 |
+| Wish / 高频顾问 | DeepSeek V4.1 Flash | 发送前补全；TODO/阶段/异常事件触发非阻塞专业提议 |
+| 长程顾问 / 独立调查 | K3.1 Pro | 原生 Goal 满 10 小时后低频监督；复杂故障可显式咨询 |
+| 独立终审 | GPT-6.2 Sol | 完整非平凡代码任务结束时一次 Lite 只读审查 |
 
-1. **Intent Alignment**：发送前补全意图、隐含约束与质量方向；原话不改写，补全包独立注入。
-2. **Intent Elaboration**：非平凡任务轻量摸底后，先问 Advisor 如何实现，再由 Worker 制定方案。低风险小修直接做。
-3. **Execution**：Karpathy 四原则 + Ponytail；连续失败时 Stop-the-Line，用 Systematic Debugging 寻找根因。
-4. **Quality Calibration**：Worker 执行真实测试并检查结果；完整代码变更就绪后，按需发起一次独立只读审查；对照证据修复、重测。
-5. **Goal**：原生长程 Goal 按目标、里程碑、证据与停止条件推进；Advisor 建议不能自行改写 Goal 或宣称完成。
+发送前 Wish 保留原话，将独立建议包交给 Worker；普通 PTC 最多两轮只读查证。Flash 后台依据领域维度和轨迹补充专业细节，不阻塞 Worker。需要用户决定的事项走 DSH 原生确认卡片；顾问建议不是用户授权或验收。Sol 只报告实际源码支持的问题，Worker 核实、修复并重测。旧阶段台账默认不启用。
 
-普通咨询使用直接模型调用，不启动子代理。复杂调查和最终代码 Review 使用独立上下文，以真实源码、Git 与可定位证据为准。阶段台账只在实际存在阶段依赖时使用。
+### 调用可视化
+
+会话顶部 **Wish 顾问** 标签（与对话、轨迹等并列），或右侧栏的同名入口，按 Wish、Flash、Kimi、Sol 筛选，查看每个调用的耗时、状态、建议、读取的知识卡及审查问题。窄窗口在更多会话视图菜单中查找。打开面板才读状态，不增加模型调用。
+
+### 没有领域卡片也能工作
+
+默认加载内置 [通用领域提示](po06/lenses/generic.md)，让 Flash 自行召回领域范式、决策维度、反例与评价标准。它可以提出候选领域索引，供本任务复用；草稿不会自动变成已审核知识。
+
+有自有领域库时，可显式导入 Markdown 卡片清单并绑定项目根目录。只在该项目中按当前任务匹配、最多读取两份原文，附文件指纹。其它项目仍使用通用提示。见 [领域知识库接口](po06/META-SUPERVISOR.md)。本仓库不包含任何个人知识库、私有项目或凭据。
 
 ## 安装
 
-要求：支持 PTC、bundle patch、原生 subagent 的 DSH 版本，以及 Node.js（开发和打包建议 22+）。先在独立 profile 试用。
+要求：支持 PTC、bundle patch、独立 subagent 和会话 View 的 DSH 版本；构建建议 Node.js 22+。先用独立 profile 试用。
 
-```bash
-git clone https://github.com/CrepuscularIRIS/autopilot-dev.git
-cd autopilot-dev
-npm pack --ignore-scripts
-dsh plugin --profile desktop add "$(pwd)/dsh-external-dsh-wish-specializer-0.9.1-autopilot.1.tgz"
-```
+    git clone https://github.com/CrepuscularIRIS/autopilot-dev.git
+    cd autopilot-dev
+    npm pack --ignore-scripts
+    dsh plugin --profile desktop add "$(pwd)/dsh-external-dsh-wish-specializer-0.9.1-autopilot.2.tgz"
 
-或使用 [Releases](https://github.com/CrepuscularIRIS/autopilot-dev/releases) 的同版本 .tgz。安装后重启 DSH Desktop，在新的会话选择 **PTC Mode**，在 Options 中开启许愿特化（High 或 Ultra）。启用顾问与只读工具；首次可用简单技术任务检查注入卡片。
-
-包名保留 `@dsh-external/dsh-wish-specializer` 以兼容既有 bundle 和 UI；它是替换原版的 fork，**不能与原版同装于一个 profile**。如已有该包，请先核对所选 profile，移除旧包或使用新的 profile。Ponytail / Superpowers 的关键规则已集成，可按需关闭重复插件；不会自动修改其它插件。
+重启 DSH Desktop，选择原生 PTC Mode，启用许愿特化、顾问与只读工具。包名保留 @dsh-external/dsh-wish-specializer 以兼容已有 bundle；不可与原版同装在同一 profile。内建 Ponytail 与 Superpowers 核心方法，可按需要关闭重复插件，不会自动修改其它插件。
 
 ## 模型配置
 
-四个角色是路由而不是固定模型。无角色配置时，使用当前会话的模型；独立审查仍使用新的只读子代理上下文。DSH Options 的模型选项只控制发送前解释层（默认跟随会话），不会改主模型或其它角色。
+模型是可配置的 provider/model 角色，不依赖 LiteLLM 或特定账号。未配置角色时使用当前会话的模型，独立审查仍运行在只读子代理上下文。发送前解释层由 Options 单独控制。将 [示例配置](examples/profile.patch.yml) 的 config 合并到实际生效的 bundle entry/profile patch，替换为本机真实 provider/model ID，不要重复插入同名 entry。metaSupervisor: false 可关闭后台提议；旧阶段核验默认关闭，只有显式 legacyStageReviews: true 才可用。
 
-| 角色 | 可选的四模型方案 | 触发 |
-|---|---|---|
-| Worker | GLM 5.4 1M | 主会话执行、图像与阶段证据核验 |
-| Advisor | DeepSeek V4.1 Flash | 默认咨询、Plan 前校准、排错 |
-| Investigator | K3.1 Pro | 根因不明或恢复路径难选，独立调查 |
-| Reviewer | GPT-6.2 Sol | 完整任务交付前一次独立代码审查 |
+普通主动咨询使用 consult_task 的 question；复杂调查使用 advisorRoute: investigate；最终审查使用 advisorRoute: review, scope: general。
 
-[示例 profile 配置](examples/profile.patch.yml) 中提供可编辑 provider/model 及 reasoningEffort。将示例的 `config` 合并到该包实际生效的 bundle entry 或 profile 覆盖层；不要再次插入同名 entry。模型 ID 必须与你在 DSH 配置的 provider 一致。没有 LiteLLM 也能使用其它 DSH provider，插件不自带 API 服务、不设置密钥。图像能力取决于模型自身。
+## 开发和验证
 
-在 PTC 中：
-```js
-return await tools.consult_task({question:"根据当前证据，真实目标、最短路线和可测 DoD 是什么？"})
-```
+    npm test
+    npm run pack:check
 
-更多：[协作规范](po06/ADVISOR.md) · [关键词语义锚点](docs/KEYWORDS.md) · [Worker 规则目录](po06/playbooks/) · [English](README.en.md)
+测试验证程序行为与接线，不等同于真实模型质量。Windows Shell 需要本机 Bash/Git for Windows/MSYS2；本 fork 不分发运行时二进制。完整规则见 [Advisor](po06/ADVISOR.md)、[关键词](docs/KEYWORDS.md) 和 [方法论](po06/playbooks/)。
 
-## 验证 / 开发
-
-```bash
-npm test
-npm run pack:check
-```
-
-源码测试为本地回归，不代表所有模型或系统实测质量。Windows 可选 Shell 需要系统 Bash/Git for Windows/MSYS2；本 fork 不分发第三方二进制运行时。DSH 的原生工具、权限与工作区配置仍由宿主控制。
-
-## License
-
-BSD-3-Clause，保留原作者版权。集成的 Ponytail 与 Superpowers 摘录按 MIT 许可保留出处及许可；见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+BSD-3-Clause，保留原作者版权。Ponytail/Superpowers 摘录按 MIT 保留出处与许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

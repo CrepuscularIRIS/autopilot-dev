@@ -963,7 +963,7 @@ await ta('EV-0102：context 提供者抛错要留痕；正常放行要返回包�
   mod.adapter.setIntentText(sid, '【包】测试文本')
   const rendered = provider({ agent: { id: sid } })
   ok(rendered.includes('【包】测试文本'), '放行时保留该会话的包')
-  ok(rendered.includes('Worker 实现、跑相关测试'), '装配同一 PTC 对话的精简流程')
+  ok(rendered.includes('GLM 实现、跑相关测试'), '装配同一 PTC 对话的精简流程')
   ok(rendered.includes('PTC 协作流程'), '放行时同时给出工作模型顾问流程')
   mod.adapter.setIntentText(sid, '')
   ok(provider({ agent: { id: sid } }).includes('PTC 协作流程'), '解释层没有新包也不能丢掉顾问调用流程')

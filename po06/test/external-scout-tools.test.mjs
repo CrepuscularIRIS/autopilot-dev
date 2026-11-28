@@ -21,7 +21,7 @@ import { ADVISOR_PARAMETERS } from '../lib/advisor.js'
 
 test('budgets and protocol rules are relaxed and fused with intent-scout', () => {
   assert.equal(OPTIMIZER_OUTPUT_BUDGET_TOKENS, 8000)
-  assert.equal(OPTIMIZER_PROMPT_REVISION, 'intent-scout-wish-4')
+  assert.equal(OPTIMIZER_PROMPT_REVISION, 'intent-scout-wish-5')
   assert.equal(LOOP_DEFAULT_ROUNDS, 6)
   assert.equal(LOOP_HARD_MAX_ROUNDS, 12)
   assert.equal(LOOP_BUDGET_MS, 150000)
@@ -212,24 +212,24 @@ test('advisor task roles select a fixed model or reject a conflicting route', ()
   for (const args of [{}, { scope: 'code' }, { scope: 'delivery', advisorRoute: 'review' },
     { scope: 'general', advisorRoute: 'review', taskId: 'task', stageId: 'S1' },
     { scope: 'code', advisorRoute: 'review' }, { advisorRoute: 'review' }]) {
-    assert.deepEqual(resolveAdvisorModelRoute({ mode: 'review_result', ...args }), cfg(args.taskId ? 'glm-5.4[1m]' : 'deepseek-v4.1-flash'))
+    assert.equal(resolveAdvisorModelRoute({ mode: 'review_result', ...args }).reason,'local-verification-only')
   }
-  assert.deepEqual(resolveAdvisorModelRoute({ mode: 'review_result', advisorRoute: 'review', scope: 'general' }), cfg('gpt-6.2-sol'))
-  assert.deepEqual(resolveAdvisorModelRoute({ mode: 'review_result', advisorRoute: 'architecture', images: [{ path: 'a.png' }] }),
-    cfg('glm-5.4[1m]'))
+  assert.deepEqual(resolveAdvisorModelRoute({ mode: 'review_result', advisorRoute: 'review', scope: 'general' }), {...cfg('gpt-6.2-sol'),reasoningEffort:'medium'})
+  assert.equal(resolveAdvisorModelRoute({ mode: 'review_result', advisorRoute: 'architecture', images: [{ path: 'a.png' }] }).reason,'local-verification-only')
   assert.deepEqual(resolveAdvisorModelRoute({ mode: 'improve_result', advisorRoute: 'review' }),
     { ok: false, reason: 'advisor-route-requires-review' })
 })
 
-test('three-model advisor routes whole Goal planning to Flash and verification to GLM',()=>{
- for(const mode of ['develop_approach','improve_result','diagnose_failure','review_result']){
-   for(const taskType of ['web_3d','visual','multimodal']) assert.equal(resolveAdvisorModelRoute({mode,taskType}).model,'deepseek-v4.1-flash')
-   assert.equal(resolveAdvisorModelRoute({mode,taskType:'long_horizon'}).model,mode==='review_result'?'glm-5.4[1m]':'deepseek-v4.1-flash')
+test('PTC: Flash aligns and plans, only final Goal verification invokes Sol; stage and vision verification stay local',()=>{
+ for(const mode of ['develop_approach','improve_result','diagnose_failure']){
+   for(const taskType of ['web_3d','visual','multimodal','long_horizon']) assert.equal(resolveAdvisorModelRoute({mode,taskType}).model,'deepseek-v4.1-flash')
    assert.equal(resolveAdvisorModelRoute({mode,advisorRoute:'architecture'}).model,'deepseek-v4.1-flash')
  }
- assert.equal(resolveAdvisorModelRoute({mode:'review_result',scope:'appearance'}).model,'glm-5.4[1m]')
- assert.equal(resolveAdvisorModelRoute({mode:'develop_approach',images:[{path:'view.png'}]}).model,'glm-5.4[1m]')
+ assert.equal(resolveAdvisorModelRoute({mode:'review_result',taskType:'long_horizon'}).model,'gpt-6.2-sol')
+ assert.equal(resolveAdvisorModelRoute({mode:'review_result',scope:'appearance'}).reason,'local-verification-only')
+ assert.equal(resolveAdvisorModelRoute({mode:'develop_approach',images:[{path:'view.png'}]}).reason,'local-visual-analysis-only')
  assert.equal(resolveAdvisorModelRoute({mode:'develop_approach',taskType:'other'}).ok,false)
+ assert.equal(resolveAdvisorModelRoute({mode:'review_result',taskId:'t',stageId:'s'},{legacyStageReviews:true}).model,'glm-5.4[1m]')
 })
 
 test('Kimi is only an explicit independent investigation route, never a default or final review',()=>{
@@ -238,18 +238,13 @@ test('Kimi is only an explicit independent investigation route, never a default 
  assert.equal(resolveAdvisorModelRoute({mode:'diagnose_failure',taskType:'long_horizon'}).model,'deepseek-v4.1-flash')
 })
 
-test('portable routes use configured provider/model, not the model name for role or review identity',()=>{
- const observed={provider:'local',model:'worker-model'}
- const models={advisor:{provider:'vendor-a',model:'fast-model',reasoningEffort:'medium'},review:{provider:'vendor-b',model:'review-model'},investigate:{provider:'vendor-c',model:'research-model'}}
- const opts={models,observed}
- assert.deepEqual(resolveAdvisorModelRoute({mode:'develop_approach'},opts),{ok:true,provider:'vendor-a',model:'fast-model',reasoningEffort:'medium'})
- assert.deepEqual(resolveAdvisorModelRoute({mode:'review_result',scope:'general',advisorRoute:'review'},opts),{ok:true,provider:'vendor-b',model:'review-model'})
- assert.deepEqual(resolveAdvisorModelRoute({mode:'review_result',taskId:'T',stageId:'S'},opts),{ok:true,...observed})
- assert.deepEqual(resolveAdvisorModelRoute({mode:'diagnose_failure',advisorRoute:'investigate'},opts),{ok:true,provider:'vendor-c',model:'research-model'})
+test('custom model role and provider routes remain portable, including shared models',()=>{
+ const observed={provider:'vendor',model:'fallback',reasoningEffort:'medium'}
+ const models={advisor:{provider:'a',model:'fast'},review:{provider:'b',model:'audit'},investigate:{provider:'c',model:'long'}}
+ assert.equal(resolveAdvisorModelRoute({mode:'develop_approach'},{models,observed}).model,'fast')
+ assert.equal(resolveAdvisorModelRoute({mode:'review_result',advisorRoute:'review',scope:'general'},{models,observed}).model,'audit')
+ assert.equal(resolveAdvisorModelRoute({mode:'diagnose_failure',advisorRoute:'investigate'},{models,observed}).model,'long')
  assert.deepEqual(resolveAdvisorModelRoute({mode:'develop_approach'},{models:{},observed}),{ok:true,...observed})
  assert.equal(resolveAdvisorModelRoute({mode:'develop_approach'},{models:{}}).ok,false)
- const shared={models:{advisor:observed,review:observed},observed}
- assert.deepEqual(resolveAdvisorModelRoute({mode:'develop_approach'},shared),resolveAdvisorModelRoute({mode:'review_result',scope:'general',advisorRoute:'review'},shared))
- assert.equal(advisorRole({mode:'develop_approach'}).role,'advisor')
- assert.equal(advisorRole({mode:'review_result',scope:'general',advisorRoute:'review'}).role,'review')
+ assert.equal(advisorRole({mode:'review_result',advisorRoute:'review',scope:'general'}).role,'review')
 })

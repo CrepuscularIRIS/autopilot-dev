@@ -201,7 +201,7 @@ function holdBridgeRead(sessionId) {
     // ⚠ 改 settings.js 的 TIER_PRESETS / TURNS_MIN / TURNS_MAX 必须同步改这里。
     // 构建标记（2026-10-19）：插件改动必须重启才生效，真机上"改了没反应"有一半是构建没换。
     // 这个常量显示在「优化选项」标题右侧，改客户端时**手动更新**（就是这一行的日期时间）。
-    const CLIENT_BUILD = 'ring-15'
+    const CLIENT_BUILD = 'ring-16-wish-view'
     // 每个会话已经为哪个预设弹过提示（模块级：组件重挂载不会忘）
     // 一次 DSH 运行进程里**最多提示一次**（用户 2026-10-19 口径）。重启后才会再次提示。
     let PRESET_NOTICE_SHOWN = false
@@ -2107,7 +2107,7 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
           disabled:!known||ready===false,
           label:k=>k==='on'?L('开启','On'):L('关闭','Off'),
           title:!known?L('顾问：还没读到当前设置，这次不会发送这个字段','Advisor: current setting not read yet')
-            :L('顾问：开启后可调用 consult_task / advisor_stage 做独立解题与复核；关闭后这两个工具直接拒绝，不发起任何模型调用。','Advisor: consult_task and advisor_stage are available when on; when off they refuse without any model call.'),
+            :L('顾问：开启后可调用 consult_task 做意图对齐、方案咨询与一次独立终审；普通验证由主会话直接完成。关闭后不发起顾问模型调用。','Advisor: consult_task and advisor_stage are available when on; when off they refuse without any model call.'),
           tones:{off:'#e05a5a',on:'#3fbf7f'},
           onPick:v=>save({advisor:v==='on'}) }))
     }
@@ -4589,8 +4589,8 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
                         onChange:value=>{if(value==='inherit'){save({model:null});return}const route=routes.find(item=>mkey(item)===value);if(route)save({model:{provider:route.provider,model:route.model}})}})),
                     effortRow),
                   h('p',{'data-po06':'explainer-model-scope',className:'po06-model-scope'},
-                    L('此处只选择发送前的解释层模型；顾问、核验、独立审查和调查的模型由插件 advisorModels 配置，未配置时跟随会话模型。',
-                      'This selects only the pre-send explainer. Advisor, verification, review and investigation model routes are set by advisorModels; unconfigured roles follow the session model.')),
+                    L('此处选择普通模式发送前的解释层模型。PTC 默认顾问 Flash，全局审查 Sol；Research Mode：Flash 补全/破题、GLM 文献与执行、Sol 核心科研、Kimi 计划与恢复。',
+                      'This setting selects the ordinary pre-send explainer. Research Mode: Flash intent/spark, GLM literature/execution, Sol scientific reasoning, Kimi planning/recovery.')),
                   h('div',{className:'po06-group'},
                     h('div',{className:'po06-row'},
                       h('span',{className:'po06-field-label'},po06Icon('ctx'),L('上下文','Context')),
@@ -4702,10 +4702,96 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
           status.error ? h('div', { style: { ...S.muted, color: T('err') } }, L('读状态失败：','Failed to read status: ') + errorText(status.error)) : null,
           h('div', { style: S.h }, L('控制','Controls')),
           h(ControlForm, { status: data, refresh: refreshStatus, sessionId }),
+          data?.capability?.features?.includes('proposal-engine-1')?h(ProposalPanel,{sessionId}):null,
           h('div', { style: S.h }, L('解释层提示词','Explainer prompt')),
           h(PromptEditor, { prompt: data && data.prompt, refresh: refreshStatus }),
         ) : null,
       )
+    }
+
+    // Reuse the existing details panel; no new top-level window or background polling.
+    function ProposalPanel({sessionId}) {
+      const [state,setState]=React.useState({items:[],error:null,loading:false})
+      const [version,setVersion]=React.useState(0)
+      React.useEffect(()=>{
+        if(!sessionId)return undefined
+        let live=true
+        setState({items:[],error:null,loading:true})
+        apiGet('/proposals?session='+encodeURIComponent(sessionId)).then(r=>{if(live)setState({items:r.items||[],error:null,loading:false})},e=>{if(live)setState({items:[],error:String(e.message||e),loading:false})})
+        return()=>{live=false}
+      },[sessionId,version])
+      const decide=async(item,decision)=>{
+        const r=await apiPost('/proposal-decision',{sessionId,id:item.id,decision})
+        if(!r.ok){setState(v=>({...v,error:r.reason||'decision failed'}));return}
+        setVersion(v=>v+1)
+        if(decision==='accepted'&&!r.queued)setState(v=>({...v,error:L('已记录采纳；会话未接收调研任务，请在合适的会话继续。','Accepted; no investigation queued in this session.')}))
+      }
+      const labels={pending:L('待处理','Pending'),'sent-to-worker':L('已排入执行上下文（非完成）','Queued for Worker (not completion)'),summarized:L('已汇总','Summarized'),expired:L('已过期，未发送','Expired, not sent'),accepted:L('已采纳','Accepted'),rejected:L('已否决','Rejected')}
+      const items=state.items.slice().reverse()
+      return h('section',{'data-po06':'proposals',style:{marginTop:12}},
+        h('div',{style:S.row},h('strong',null,L('DS 专业提议','DS proposals')+' · '+items.length),h('button',{type:'button',style:{...S.small,marginLeft:'auto'},onClick:()=>setVersion(v=>v+1)},L('刷新','Refresh'))),
+        state.loading?h('div',{style:S.muted},L('读取中…','Loading…')):null,
+        state.error?h('div',{style:{...S.muted,color:T('warn')}},state.error):null,
+        !items.length&&!state.loading?h('div',{style:S.muted},L('当前会话暂无提议','No proposals in this session')):null,
+        ...items.map(item=>h('details',{key:item.id,style:{margin:'8px 0',overflowWrap:'anywhere'}},
+          h('summary',null,'['+item.action+'] '+item.topic+' · '+(labels[item.status]||item.status)),
+          h('div',{style:{whiteSpace:'pre-wrap',lineHeight:1.6,margin:'6px 0'}},item.text),
+          h('small',{style:S.muted},item.id+' · '+item.role),
+          item.action==='propose'&&item.status==='pending'?h('div',{style:{display:'flex',gap:8,marginTop:6}},
+            h('button',{type:'button',style:S.small,onClick:()=>decide(item,'accepted')},L('采纳 / 调研','Accept / investigate')),
+            h('button',{type:'button',style:S.small,onClick:()=>decide(item,'rejected')},L('否决','Reject'))):null)))
+    }
+
+    function collaborationSummary(r){
+      if(r.kind!=='wish')return r.summary
+      try{
+        const j=JSON.parse(r.summary)
+        if(!j.intent||!Array.isArray(j.add)||!Array.isArray(j.ask))return r.summary
+        return [j.intent.text, ...[['制作建议',j.add],['辅助建议',j.scaffold],['待确认',j.ask]].filter(([,v])=>v?.length).map(([k,v])=>k+'：\n'+v.map((x,i)=>(i+1)+'. '+x).join('\n'))].filter(Boolean).join('\n\n')
+      }catch{return r.summary}
+    }
+    // Native right-sidebar tab; polling only while this body is mounted/visible.
+    function CollaborationPanel({sessionId}) {
+      useLocaleLive(); useThemeLive()
+      const [state,setState]=React.useState({runs:[],loading:true,error:null})
+      const [filter,setFilter]=React.useState('all')
+      React.useEffect(()=>{setFilter('all')},[sessionId])
+      React.useEffect(()=>{
+        let alive=true,timer=null
+        setState({runs:[],loading:true,error:null})
+        const poll=async()=>{
+          try{
+            const data=await apiGet('/collaboration-runs?session='+encodeURIComponent(sessionId||''))
+            if(alive)setState({runs:data.runs||[],loading:false,error:null})
+          }catch(e){if(alive)setState(v=>({...v,loading:false,error:errorText(e)}))}
+          if(alive)timer=window.setTimeout(poll,2500)
+        }
+        if(sessionId)poll()
+        return()=>{alive=false;if(timer)window.clearTimeout(timer)}
+      },[sessionId])
+      const label={wish:'Wish · Flash',proposal:'Proposal · Flash',goal:'Goal · Kimi',review:'Review · Sol',consult:L('主动咨询','Consultation'),investigation:L('独立调查','Investigation')}
+      const status={running:L('运行中','Running'),complete:L('已返回','Returned'),on_track:L('正常推进','On track'),failed:L('失败','Failed'),'invalid-output':L('格式无效','Invalid output'),cancelled:L('已取消','Cancelled'),unknown:L('历史结果未记录','Historical result unknown'),interrupted:L('已中断','Interrupted'),timeout:L('超时','Timeout'),skipped:L('未调用模型','No model call')}
+      const duration=ms=>Number.isFinite(ms)?(ms/1000).toFixed(1)+'s':'—'
+      const modelGroup=r=>r.kind==='goal'||r.kind==='investigation'?'kimi':r.kind==='review'?'sol':r.kind==='wish'?'wish':'flash'
+      const groups=[['all',L('全部','All')],['wish','Wish'],['flash','Flash'],['kimi','Kimi'],['sol','Sol']]
+      const visible=filter==='all'?state.runs:state.runs.filter(r=>modelGroup(r)===filter)
+      return h('div',{...themeAttrs(),'data-po06':'collaboration-panel',style:{padding:12,overflowY:'auto',height:'100%',boxSizing:'border-box',color:'var(--po06-fg,inherit)'}},
+        h('h3',{style:{margin:'0 0 5px',fontSize:15}},L('Wish 与顾问','Wish & advisors')),
+        h('p',{style:{...S.muted,margin:'0 0 12px'}},L('Wish 发送前处理；后台监督与主 Agent 并行。','Wish runs before send; background advisors run in parallel.')),
+        h('div',{'data-po06':'collaboration-filters',style:{display:'flex',gap:6,flexWrap:'wrap',marginBottom:10}},...groups.map(([id,name])=>h('button',{key:id,type:'button',style:{...S.small,...(filter===id?S.segOn:null)},'aria-pressed':filter===id,onClick:()=>setFilter(id)},name+' · '+(id==='all'?state.runs.length:state.runs.filter(r=>modelGroup(r)===id).length)))),
+
+        state.loading?h('p',{style:S.muted},L('加载中…','Loading…')):null,
+        state.error?h('p',{style:S.muted},state.error):null,
+        !state.loading&&!state.runs.length?h('p',{style:S.muted},L('此会话暂无顾问调用','No advisor calls for this session')):null,
+        ...visible.map(r=>h('details',{key:r.id,'data-po06':'collaboration-run',style:{borderBottom:'1px solid var(--po06-border,rgba(128,128,128,.25))',padding:'9px 0',overflowWrap:'anywhere'}},
+          h('summary',{style:{cursor:'pointer',fontSize:13}},
+            h('strong',null,label[r.kind]||r.kind),' · ',status[r.status]||r.status,' · ',duration(r.ms)),
+          h('div',{style:{...S.muted,marginTop:7}},[r.model,r.reason,r.outcome].filter(Boolean).join(' · ')),
+          r.cards?.length?h('p',{style:S.muted},L('知识卡片：','Cards: ')+r.cards.map(c=>c.id).join(', ')):null,
+          r.tools!=null?h('p',{style:S.muted},L('工具调用：','Tool calls: ')+r.tools+(r.toolNames?.length?' · '+r.toolNames.join(', '):'')):null,
+          r.error?h('p',{style:S.muted},r.error):null,
+          r.summary?h('div',{style:{whiteSpace:'pre-wrap',fontSize:12,lineHeight:1.5,marginTop:8}},collaborationSummary(r)):null,
+          ...(r.items||[]).map((x,i)=>h('div',{key:x.id||i,style:{fontSize:12,whiteSpace:'pre-wrap',marginTop:8}},h('strong',null,'['+x.action+'] '+(x.topic||'')),h('div',null,x.text||L('旧版日志只记录动作','Legacy log recorded action only')))))) )
     }
 
     // ── ② 设置页里的一页（同一套控件）─────────────────────────────────
@@ -5011,7 +5097,9 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
       }, [reasoning, processOpen])
       const mode = args.mode || (value && value.mode) || (run && run.mode)
       const isContribution = mode === 'develop_approach' || mode === 'improve_result'
-      const title = mode === 'improve_result' ? L('顾问 · 产物拔高', 'Advisor · Result improvement') : mode === 'develop_approach' ? L('顾问 · 独立解题', 'Advisor · Independent solution') : mode === 'review_result' ? L('顾问 · 独立验收', 'Advisor · Independent review') : L('顾问 · 失败诊断', 'Advisor · Failure diagnosis')
+      const lite=!!value?.reviewStatus||!value&&args.advisorRoute==='review'&&args.scope==='general'
+      const liteLabel=({findings:L('发现问题','Findings'), 'no-findings':L('已检查范围无实质问题','No material findings in inspected scope'),incomplete:L('审查未完成','Incomplete review')})[value?.reviewStatus]
+      const title = lite ? 'Sol Review · Lite' : mode === 'improve_result' ? L('顾问 · 产物拔高', 'Advisor · Result improvement') : mode === 'develop_approach' ? L('顾问 · 独立解题', 'Advisor · Independent solution') : mode === 'review_result' ? L('顾问 · 独立验收', 'Advisor · Independent review') : L('顾问 · 失败诊断', 'Advisor · Failure diagnosis')
       const isPartial = !!(value && (value.partial || (value.presentationMeta && value.presentationMeta.partial)))
       const meta = (value && value.presentationMeta) || null
       // ⚠ 两个概念必须分开（GitHub #30(b)）：
@@ -5028,8 +5116,8 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
       const recordingFailed = !!(value && ((value.stageRecording && value.stageRecording.ok === false) || (value.presentationMeta && value.presentationMeta.stageRecording && value.presentationMeta.stageRecording.ok === false)))
       const stagePassed = !!(declaredStage && stageState && stageState.advanceAllowed === true && stageState.ok === true && !isPartial && !(stageState.dependencyStages && stageState.dependencyStages.length) && !recordingFailed)
       const status = staged && !running ? (stagePassed ? L('当前阶段可放行', 'Current stage may advance') : L('当前阶段未放行', 'Current stage cannot advance')) : running ? advisorStage(stage) : isPartial ? (hasRetained ? L('保留部分内容', 'Partial output') : L('未形成结论', 'No usable output'))
-        : report ? advisorVerdict(report.verdict) : advisorStage(stage)
-      const tone = (staged ? stagePassed : report && !isPartial && report.verdict === 'pass') ? T('ok') : (running || isContribution && ['suggestion','keep'].includes(report?.verdict) && !isPartial) ? T('acc') : T('warn')
+        : liteLabel || (report ? advisorVerdict(report.verdict) : advisorStage(stage))
+      const tone = value?.reviewStatus==='no-findings' ? T('fg2') : (staged ? stagePassed : report && !isPartial && report.verdict === 'pass') ? T('ok') : (running || isContribution && ['suggestion','keep'].includes(report?.verdict) && !isPartial) ? T('acc') : T('warn')
       const elapsed = run ? Math.max(0, ((run.finishedAt || state.clock) - run.startedAt) / 1000)
         : value && typeof value.ms === 'number' ? value.ms / 1000 : null
       // 用一个静止的进度条把"还在跑、跑了多久"画出来，比只有一个秒数直观；上限对齐 advisor.js 的 150s，
@@ -5102,11 +5190,12 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
           sectionHead('IconSearchOutlineRegular', L('原 AI 询问内容', 'Original AI question')),
           h('p', { style: { ...textStyle, color: T('fg2'), maxHeight: '160px', overflowY: 'auto' } }, question || L('正在接收询问…', 'Receiving question…'))),
         staged ? h(AdvisorStageCard, { stageState, stagePassed }) : null,
-        !isContribution && !staged && value && value.reviewPassed !== undefined ? h('div', {'data-po06-advisor-outcome':true,style:{marginTop:'10px',fontSize:'12px',color:T('fg2')}},
+        !isContribution && !staged && value && value.reviewPassed !== undefined && !value.reviewStatus ? h('div', {'data-po06-advisor-outcome':true,style:{marginTop:'10px',fontSize:'12px',color:T('fg2')}},
           L('咨询调用：','Invocation: ') + (value.invocationSucceeded ? L('成功','Succeeded') : L('未成功','Unavailable')) + ' · ' +
           (value.reviewPassed ? L('当前专项通过（非整体完成）','Reviewed scope passed (not task completion)') : L('验收待补','Verification pending')),
           ((value.reviewState && value.reviewState.openIssues) || value.openIssues || []).map((row,i)=>h('p',{key:row.id||i,style:{margin:'5px 0',color:T('warn'),overflowWrap:'anywhere'}},
             (row.id ? row.id + ' · ' : '') + row.criterion + ' · ' + (row.nextStep || row.action || '')))) : null,
+        value?.reviewStatus&&report?.limitations?.length?h('p',{style:{color:T('warn'),fontSize:'12px'}},report.limitations.join('；')):null,
         h(AdvisorMaterials, { materials, openFile: props.openFile }),
         value && value.inspectedMaterials && value.inspectedMaterials.length ? h('details',{'data-po06-advisor-reads':true,style:{marginTop:'8px',fontSize:'11px',color:T('fg3')}},
           h('summary',null,L('顾问补读（不等于全文验收）','Advisor reads (not whole-file acceptance)')),
@@ -5649,6 +5738,28 @@ const useStatus = (sessionId) => usePoll(React.useCallback(
 
       // ① 控件栏（P10 换的挂载点：从 conversation.input.dock 搬到 conversation.input.left；
       //    旧的小胶囊**不再挂载**——"胶囊 + 一排控件"同时出现只会更乱）
+      // Use the host's actual extensible right Sidebar rather than posing as a subagent.
+      let sidebarInject=false
+      try{sidebarInject=typeof ctx.inject==='function'}catch{}
+      if(sidebarInject)try{
+        const dispose=ctx.inject(['sidebarRightTabs'],scope=>{
+          if(!isLive())return
+          const id=NS+'-collaboration'
+          const release=scope.sidebarRightTabs.register({id,kind:id,title:()=>L('Wish 顾问','Wish advisors'),
+            guide:[{id:'open',order:48,title:()=>L('Wish 顾问','Wish advisors'),description:()=>L('查看许愿与顾问调用、耗时及建议','Inspect Wish and advisor calls, timing and suggestions')}]})
+          const add=()=>scope.slots.register({name:'sidebar.right.pane.tab',key:id,priority:KEYED_PRIORITY},CollaborationPanel)
+          const unmount=typeof scope.slots.inject==='function'?scope.slots.inject('sidebar.right.pane.tab',add):add()
+          if(typeof scope.effect==='function')scope.effect(()=>()=>{unmount?.();release?.()})
+          else own(()=>{unmount?.();release?.()})
+        })
+        own(dispose)
+      }catch(e){console.warn('[po06] advisor sidebar unavailable',e)}
+      // Native conversation view, next to Chat / Trajectory / Fleet.
+      // Use a separate list entry; do not replace built-in views or report fake subagents.
+      try{
+        const registerView=()=>ctx.slots.register({name:'conversation.view',id:NS+'-collaboration-view',order:11,label:()=>L('Wish 顾问','Wish advisors')},CollaborationPanel)
+        own(typeof ctx.slots.inject==='function'?ctx.slots.inject('conversation.view',registerView):registerView())
+      }catch(e){console.warn('[po06] collaboration view unavailable',e)}
       mount('conversation.input.left', 'prompt-optimizer', 20, ControlBar)
       mount('shell.overlay', NS + '-panel', 40, () => null)   // 面板本体在控件栏里渲染；这一条保证浮层槽可用
       mount('settings.plugins.tab', NS, 40, SettingsTab)

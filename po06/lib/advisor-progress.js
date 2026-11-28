@@ -141,6 +141,15 @@ export function createAdvisorProgress({ home, now = Date.now, limit = ADVISOR_UI
       out.reasoning = ''; out.draft = ''
       return out
     },
+    list(sessionId) {
+      return [...records.values()].filter(r=>r.sessionId===String(sessionId)).map(r=>({
+        id:r.runId,kind:r.result?.finalReview||r.mode==='review_result'?'review':r.result?.model==='k3.1-pro'?'investigation':'consult',
+        model:r.result?.model||r.model||null,status:terminal.has(r.stage)?(['local-verification-only','final-review-already-attempted','local-visual-analysis-only'].includes(r.reason)?'skipped':r.stage==='done'?'complete':r.stage):'running',
+        startedAt:r.startedAt,ms:(r.finishedAt||now())-r.startedAt,tools:r.toolCalls,
+        summary:r.result?.report?.summary||r.question,error:r.reason||null,
+        items:(r.result?.report?.findings||[]).map(x=>({action:'finding',text:x.text||String(x)})).slice(0,20),
+      }))
+    },
     dispose() {
       for (const row of records.values()) if (!terminal.has(row.stage)) {
         row.stage = 'interrupted'; row.reason = 'plugin-unloaded'; row.finishedAt = now()

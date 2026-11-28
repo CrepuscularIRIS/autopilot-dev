@@ -282,7 +282,7 @@ function readTextSafe(path) {
  *                         宿主就不知道政策变了。返回值原样带回给界面（诊断用）。
  * @param opts.now         注入时钟（测试用）
  */
-export function createControlHandler({ home, stateDir, ledgerPath, version = null, resolveEfforts = null, sessionModel = null, capabilityProbe = null, workingText = null, workingTextInfo = null, listModels = async () => ({ models: [], problems: [] }), listTools = null, toolState = null, now = () => Date.now(), help = {}, interpret = null, setPacket = null, progress = null, advisorProgress = null, rollbackPacket = null, getPacket = null, getInjection = null, getNotice = null, clearNotice = null, clearNotices = null, getPreset = null, inspectPreset = null, presetDismissed = null, getPresetPending = null, getPresetAt = null, clearPresetPending = null, sessionFirstSeen = null, getPresets = null, onSettingsWritten = null, gateSummary = null, registeredCommands = null, advisorStageStatus = null, capabilityStatus = null, inferenceStatus = null, inferenceList = null, inferenceGet = null, inferenceCancel = null,englishStatus=null,englishGet=null,optimizerStatus=null,advisorDelivery=null } = {}) {
+export function createControlHandler({ home, stateDir, ledgerPath, version = null, resolveEfforts = null, sessionModel = null, capabilityProbe = null, workingText = null, workingTextInfo = null, listModels = async () => ({ models: [], problems: [] }), listTools = null, toolState = null, now = () => Date.now(), help = {}, interpret = null, setPacket = null, progress = null, advisorProgress = null, rollbackPacket = null, getPacket = null, getInjection = null, getNotice = null, clearNotice = null, clearNotices = null, getPreset = null, inspectPreset = null, presetDismissed = null, getPresetPending = null, getPresetAt = null, clearPresetPending = null, sessionFirstSeen = null, getPresets = null, onSettingsWritten = null, gateSummary = null, registeredCommands = null, advisorStageStatus = null, capabilityStatus = null, inferenceStatus = null, inferenceList = null, inferenceGet = null, inferenceCancel = null,englishStatus=null,englishGet=null,optimizerStatus=null,advisorDelivery=null,proposals=null,proposalDecision=null,collaborationRuns=null,lensList=null,lensSearch=null,lensCards=null,lensImport=null,lensBind=null } = {}) {
   const H = String(home)
   const cfgPath = join(H, 'po06.json')
   const ledger = ledgerPath || join(H, 'po06-wire.jsonl')
@@ -641,6 +641,39 @@ try { m = (typeof sessionModel === 'function') ? await sessionModel(sid) : null 
         const value=typeof inferenceCancel==='function'?inferenceCancel(sid,run):{ok:false,reason:'not-ready'}
         return send(value.ok?200:400,value)
       }
+      if(method==='GET'&&path===API_PREFIX+'/collaboration-runs'){
+        const sid=String(query.get('session')||'').trim()
+        if(!/^[A-Za-z0-9._:@-]{1,240}$/.test(sid))return send(400,{ok:false,reason:'session-required'})
+        return send(200,{ok:true,runs:typeof collaborationRuns==='function'?collaborationRuns(sid):[]})
+      }
+      if(method==='GET'&&path===API_PREFIX+'/proposals'){
+        const sid=String(query.get('session')||'').trim()
+        if(!/^[A-Za-z0-9._:@-]{1,240}$/.test(sid))return send(400,{ok:false,reason:'session-required'})
+        return send(200,{ok:true,items:typeof proposals==='function'?proposals(sid):[]})
+      }
+      if(method==='POST'&&path===API_PREFIX+'/proposal-decision'){
+        const body=await readBody(req);if(!body.ok)return send(400,{ok:false,reason:body.reason})
+        const {sessionId,id,decision}=body.value||{}
+        if(typeof sessionId!=='string'||!/^[a-f0-9]{12}$/.test(id||'')||!['accepted','rejected'].includes(decision))return send(400,{ok:false,reason:'invalid-proposal-decision'})
+        const result=typeof proposalDecision==='function'?await proposalDecision({sessionId,id,decision}):{ok:false,reason:'not-ready'}
+        return send(result.ok?200:400,result)
+      }
+      if(method==='GET'&&path===API_PREFIX+'/lenses'){
+        const q=query.get('query')
+        if(q!==null){const found=typeof lensSearch==='function'?lensSearch(q):[];return send(200,{ok:true,...(Array.isArray(found)?{domains:found,drafts:[]}:found)})}
+        return send(200,{ok:true,...(typeof lensList==='function'?lensList():{domains:[],bindings:{},drafts:[]})})
+      }
+      if(method==='GET'&&path===API_PREFIX+'/lens-cards'){
+        const cwd=query.get('cwd'),q=query.get('query')
+        if(!cwd||!cwd.startsWith('/')||!q||q.length>10000)return send(400,{ok:false,reason:'cwd-and-query-required'})
+        return send(200,{ok:true,cards:typeof lensCards==='function'?lensCards(cwd,q):[]})
+      }
+      if(method==='POST'&&[API_PREFIX+'/lens-import',API_PREFIX+'/lens-bind'].includes(path)){
+        const body=await readBody(req);if(!body.ok)return send(400,{ok:false,reason:body.reason})
+        const fn=path.endsWith('/lens-import')?lensImport:lensBind
+        const result=typeof fn==='function'?await fn(body.value||{}):{ok:false,reason:'not-ready'}
+        return send(result.ok?200:400,result)
+      }
       if(method==='GET'&&path===API_PREFIX+'/advisor-delivery'){
         const sid=String(query.get('session')||'').trim(),rawSeq=query.get('seq'),seq=Number(rawSeq)
         if(!/^[A-Za-z0-9._:@-]{1,240}$/.test(sid)||rawSeq===null||rawSeq.trim()===''||!Number.isSafeInteger(seq)||seq<0)return send(400,{ok:false,reason:'session-and-event-seq-required'})
@@ -756,7 +789,7 @@ try { m = (typeof sessionModel === 'function') ? await sessionModel(sid) : null 
         const dismissed = typeof presetDismissed === 'function' ? presetDismissed() === true : false
         // 2026-10-19 用户确认口径：**只有非 Wish 且非 PTC 才提醒**（这两个预设本身就是推荐态）。
         // 注意：PTC 会话按此口径不会弹窗——那不是"没实现"，是设计如此（debug 里 preset 会有值）。
-        const notice = preset && preset !== 'wish' && preset !== 'ptc' && !dismissed ? { preset } : null
+        const notice = preset && preset !== 'wish' && preset !== 'ptc' && preset !== 'research' && !dismissed ? { preset } : null
         // via=watch 是"盯着输入区"的探测（打字每几百毫秒一次）⇒ 不进台账；只记真正的回车询问与调试查询
         const via = String(query.get('via') || 'direct')
         if (via !== 'watch') {

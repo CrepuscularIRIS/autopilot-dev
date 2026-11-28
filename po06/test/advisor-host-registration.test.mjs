@@ -22,7 +22,7 @@ test('installed adviser tool routes normalized tasks independently of the explai
   const child={session:{id:spec.childId,header:{origin:'subagent',agentPreset:'standard'}}}
   const call={name:'review_inspect',agent:child,arguments:{operation:'read',path:'page.html'}}
   assert.equal(guards[0](call),undefined)
-  assert.equal(typeof guards[0]({name:'bash',agent:child}),'string')
+  for(const name of ['bash','edit','write','subagent','consult_task'])assert.equal(typeof guards[0]({name,agent:child}),'string')
   if(performReads){
     const read=await defs.get('review_inspect').execute(call.arguments,{agent:child})
     assert.equal(read.ok,true);assert.equal(read.evidenceRef,'read:page.html');assert.match(read.text,/<main>/)
@@ -30,8 +30,9 @@ test('installed adviser tool routes normalized tasks independently of the explai
   const refs=performReads?['read:page.html']:['F0']
   const investigation=spec.agentOptions.model==='k3.1-pro'
   const report=investigation?{verdict:'change',summary:'Root cause investigation',findings:[{text:'The main element is present',evidenceRefs:refs}],checks:[],nextStep:'Test the hypothesis',stopCondition:'Evidence resolves hypothesis'}:
-    {verdict:'pass',summary:'Fixture checked.',findings:[{text:'Source main exists',evidenceRefs:refs}],checks:[{criterion:'Source main exists',status:'satisfied',evidenceRefs:refs},...(spec.prompt.some(b=>b.type==='image')?[{criterion:'Rendered main is visible',status:'satisfied',evidenceRefs:['I0']}]:[])],nextStep:'finish',stopCondition:'subject changes'}
-
+    {status:'complete',summary:'Fixture checked.',findings:[],limitations:[]}
+  if(!investigation&&JSON.parse(packet).nativeGoal)report.findings=[{text:'Important · page.html:1 · actual failure scenario',evidenceRefs:refs}]
+  changeGoalDuringReview?.()
   return {result:Promise.resolve({stopReason,output:[{type:'text',text:JSON.stringify(report)}]}),dispose:async()=>{}}
  }}
  const guards=[]
@@ -64,14 +65,11 @@ test('installed adviser tool routes normalized tasks independently of the explai
  try{
   const mod=await import('../lib/index.js?stage-registration')
   mod.apply(ctx,{advisorModels:mod.EXAMPLE_ADVISOR_MODELS})
-  assert.ok(defs.has('consult_task'));assert.ok(defs.has('advisor_stage'))
+  assert.ok(defs.has('consult_task'));assert.ok(!defs.has('advisor_stage'),'legacy stages are not registered by default')
   assert.ok(typeof mod.adapter.reviewFeedback==='function')
-  assert.ok(defs.get('advisor_stage').parameters.properties.subjectPaths)
   assert.ok(defs.get('consult_task').parameters.properties.taskId)
   assert.ok(defs.get('consult_task').parameters.properties.mode.enum.includes('improve_result'))
   assert.ok(defs.get('consult_task').parameters.properties.currentResult)
-  assert.equal(defs.get('advisor_stage').presentCall({action:'status'}).card,'generic')
-  assert.equal(defs.get('advisor_stage').presentCall({action:'status'}).kind,'other')
   const advisor=defs.get('consult_task')
   const events=[{type:'user/message',seq:1,data:{id:'request-one',source:{kind:'user'},content:[{type:'text',text:'Verify the implementation.'}]}}]
   const session={id:'advisor-routing',snapshotEvents:()=>events,append(type,data){events.push({type,data,seq:events.length+1})}}
@@ -91,23 +89,11 @@ test('installed adviser tool routes normalized tasks independently of the explai
   assert.doesNotMatch(interpreter,/NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST|The best code is the code never written/)
   assert.ok(!defs.has('review_task'))
   session.header={cwd:home}
-  const stage=(action,args={})=>defs.get('advisor_stage').execute({action,...args},{agent:{session}})
-  const task=await stage('start_task',{title:'Verify the implementation'})
-  assert.equal(task.ok,true,JSON.stringify(task))
-  const defined=await stage('define_stage',{taskId:task.taskId,scope:'code',focus:'Main element',
-   criteria:['The source defines a main element'],subjectPaths:['page.html']})
-  assert.equal(defined.ok,true,JSON.stringify(defined))
-  const target={taskId:task.taskId,stageId:defined.stage.id}
-  const intermediate={advisorRoute:'review',...target,files:[{path:'page.html',purpose:'Inspect the main element',evidenceType:'source'}]}
-  assert.equal((await stage('advance',target)).ok,false)
-  const reviewed=await consult(intermediate)
-  assert.equal(reviewed.reviewPassed,true,JSON.stringify(reviewed))
-  assert.equal((await stage('advance',target)).ok,true)
-  writeFileSync(join(home,'page.html'),'<main>Changed</main>')
-  assert.equal((await stage('advance',target)).ok,false,'changing the subject invalidates the review')
-  assert.match(calls[3].system,/NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE/)
-  assert.equal(calls[3].model,'glm-5.4[1m]')
-  assert.equal(children.length,0,'intermediate requests must not start Sol')
+  // Replaying the old stage requests must never start a model or open a stage loop.
+  const intermediate={advisorRoute:'review',entry:'verify',taskId:'legacy-task',stageId:'S2',files:[{path:'page.html',purpose:'Source',evidenceType:'source'}]}
+  for(let i=0;i<13;i++)assert.equal((await consult(intermediate)).reason,'local-verification-only')
+  assert.equal((await consult({entry:'verify',scope:'code',focus:'Source'})).reason,'local-verification-only')
+  assert.equal(calls.length,3);assert.equal(children.length,0)
   const final={advisorRoute:'review',scope:'general',images:[{path:'screen.png',purpose:'Rendered main',evidenceType:'runtime-capture'}]}
   const unsuccessful=await consult(final)
   assert.notEqual(unsuccessful.reviewPassed,true)
@@ -124,18 +110,22 @@ test('installed adviser tool routes normalized tasks independently of the explai
   const completed=await consult(final)
   assert.equal((await consult(final)).reason,'final-review-already-attempted')
   assert.equal(completed.model,'litellm/gpt-6.2-sol',JSON.stringify(completed))
-  assert.equal(completed.reviewPassed,true,JSON.stringify(completed))
-  assert.equal(completed.disposition,'reviewed-scope-only')
+  assert.equal(completed.reviewStatus,'no-findings',JSON.stringify(completed))
+  assert.equal(completed.reviewPassed,false)
+  assert.equal(completed.disposition,'independent-review-only')
   assert.equal(completed.independentInspection.successfulReads,1)
-  assert.equal(completed.independentInspection.citesIndependentEvidence,true)
-  assert.equal(calls.length,4,'neither final attempt used the direct LLM stream')
+  assert.equal(completed.independentInspection.citesIndependentEvidence,false,'no findings do not require citation; actual read trace still proves inspection')
+  assert.equal(calls.length,3,'neither final attempt used the direct LLM stream')
   assert.equal(children.length,2,'one Sol child per task including follow-ups')
   for(const child of children){
    assert.equal(child.agentOptions.model,'gpt-6.2-sol')
    assert.equal(child.agentPreset,'standard')
    assert.match(child.childId,/^session-wish-review-[a-f0-9-]+$/)
    assert.match(child.prompt[0].text,/NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE/)
-   assert.match(child.prompt[0].text,/Check against codebase reality/)
+   assert.match(child.prompt[0].text,/scope → find → challenge → report/)
+   assert.match(child.prompt[0].text,/never edit files/)
+   assert.equal(child.agentOptions.reasoningEffort,'medium')
+   assert.doesNotMatch(child.prompt[0].text,/Codex rubric|六态|21 项/)
    assert.ok(child.prompt.some(block=>block.type==='image' && block.attachment.id==='fixture-image'))
    const text=child.prompt.find(block=>block.type==='text' && block.text.startsWith('{"mode":')).text
    assert.equal(JSON.parse(text).snapshot.historyPolicy,'final-explicit-evidence-only')
@@ -145,49 +135,74 @@ test('installed adviser tool routes normalized tasks independently of the explai
   assert.equal(guards[0]({agent:{session:{id:'regular-child',header:guarded.header}}}),undefined)
   assert.equal(typeof guards[0]({name:'subagent',arguments:{model:'gpt-6.2-sol'},agent:{session}}),'string')
   assert.equal(guards[0]({name:'subagent',arguments:{model:'glm-5.4[1m]'},agent:{session}}),undefined)
-  // Native Goal consultation is distinct from stage/Sol review and has no write authority.
+  // Old whole-Goal verification is redirected to the same single independent final review (no GLM checklist).
   const goal={id:'goal-native',revision:1,objective:'The source defines a main element',phase:'active',maxGoalRounds:16}
   const request={entry:'verify',taskType:'long_horizon',files:[{path:'page.html',purpose:'Actual source',evidenceType:'source'}]}
   assert.equal((await consult(request)).reason,'active-native-goal-required')
   session.append('goal/change',{kind:'goal/change',goal,roundsStarted:0})
   session.append('user/message',{source:{kind:'goal',goalId:goal.id,revision:1,round:1},content:[{type:'text',text:'Continue native goal.'}]})
-  assert.equal((await consult({entry:'verify',taskType:'long_horizon'})).reason,'goal-review-evidence-required')
-  const verified=await consult(request)
-  assert.equal(verified.goalAssessment.ready,true,JSON.stringify(verified))
-  assert.equal(verified.goalAssessment.advisoryOnly,true)
-  assert.equal(verified.completionClaimAllowed,false)
-  assert.equal(verified.recording,undefined,'Goal advice cannot write review coverage')
-  assert.equal(calls.at(-1).model,'glm-5.4[1m]')
-  assert.deepEqual(calls.at(-1).packet.nativeGoal,{...goal,roundsStarted:1})
-  assert.equal(calls.at(-1).packet.snapshot.historyPolicy,'goal-explicit-evidence-only')
-  assert.equal(events.filter(e=>e.type==='goal/change').length,1,'advisor never changes Goal state')
-  assert.equal(children.length,2,'Goal advisor does not start a subagent')
-  changeGoalDuringReview=()=>session.append('goal/change',{kind:'goal/change',goal:{...goal,revision:2,objective:'Updated goal'},roundsStarted:1})
-  const stale=await consult(request)
-  assert.equal(stale.goalAssessment.current,false)
-  assert.equal(stale.goalAssessment.ready,false)
-  assert.equal(stale.report.decision,'HOLD')
-  changeGoalDuringReview=null
-  // A new native Goal is a new review identity even if the intent recognizer still says continue.
-  const actual=await consult({advisorRoute:'review',scope:'general'})
-  assert.equal(actual.reviewPassed,true,JSON.stringify(actual))
+  const actual=await consult(request)
+  assert.equal(actual.model,'litellm/gpt-6.2-sol',JSON.stringify(actual))
+  assert.equal(actual.reviewStatus,'findings',JSON.stringify(actual))
+  assert.equal(actual.reviewPassed,false)
   assert.equal(actual.independentInspection.successfulReads,1)
+  assert.equal(actual.goalAssessment,undefined)
+  assert.equal(actual.report.checks.length,0,'lite review does not build an acceptance checklist')
+  assert.equal(actual.recording,undefined,'final review is not a legacy coverage/advance gate')
+  assert.equal((await consult(request)).reason,'final-review-already-attempted')
   assert.equal((await consult({advisorRoute:'review',scope:'general'})).reason,'final-review-already-attempted')
+  assert.equal(calls.length,3,'no GLM review at all')
+  assert.equal(children.length,3)
   const investigation=await consult({entry:'rework',advisorRoute:'investigate',question:'Find the cause and recovery path'})
   assert.equal(investigation.model,'litellm/k3.1-pro')
   assert.equal(investigation.independentInspection.successfulReads,1)
   assert.notEqual(investigation.reviewPassed,true)
   assert.match(children.at(-1).childId,/^session-wish-investigate-/)
   assert.equal(typeof guards[0]({name:'subagent',arguments:{model:'k3.1-pro'},agent:{session}}),'string')
+  session.append('goal/change',{kind:'goal/change',goal:{...goal,id:'goal-changed',revision:1},roundsStarted:0})
+  changeGoalDuringReview=()=>session.append('goal/change',{kind:'goal/change',goal:{...goal,id:'goal-changed',revision:2,objective:'Updated goal'},roundsStarted:0})
+  const stale=await consult({advisorRoute:'review',scope:'general'})
+  assert.equal(stale.reviewScopeChanged,true)
+  assert.notEqual(stale.reviewPassed,true)
+  assert.equal(stale.reviewStatus,'incomplete')
+  changeGoalDuringReview=null
   session.append('goal/change',{kind:'goal/change',goal:{...goal,id:'goal-second',revision:1},roundsStarted:0})
   performReads=false
   const unread=await consult({advisorRoute:'review',scope:'general',files:[{path:'page.html',purpose:'Source'}]})
   assert.notEqual(unread.reviewPassed,true)
   assert.equal(unread.independentInspection.successfulReads,0)
   assert.equal(unread.report.decision,'HOLD')
+  assert.equal(unread.reviewStatus,'incomplete')
+  session.append('goal/change',{kind:'goal/change',goal:{...goal,id:'goal-source-changed',revision:1},roundsStarted:0})
+  performReads=true
+  changeGoalDuringReview=()=>writeFileSync(join(home,'page.html'),'<main>Changed after inspection</main>')
+  const staleSource=await consult({advisorRoute:'review',scope:'general'})
+  assert.equal(staleSource.reviewStatus,'incomplete')
+  assert.match(staleSource.report.limitations.join(' '),/源码已变化/)
+  assert.equal(staleSource.report.findings[0].unverified,true)
+  changeGoalDuringReview=null
   assert.equal(typeof guards[0]({name:'review_inspect',agent:{session}}),'string')
   for(const dispose of effects.reverse())dispose()
   assert.ok(!live.has('advisor_stage'));assert.ok(!live.has('consult_task'))
   assert.equal(mod.adapter.reviewFeedback,null)
  }finally{process.env.DSH_HOME=old;rmSync(home,{recursive:true,force:true})}
+})
+
+test('Lite report never turns empty findings or unsupported claims into acceptance',async()=>{
+ const {parseLiteReviewReport,acceptanceBanner}=await import('../lib/advisor.js')
+ const wrap=(findings,refs,status='complete')=>parseLiteReviewReport(JSON.stringify({status,summary:'Scoped review',findings,limitations:[]}),refs)
+ const none=wrap([],['read:page.html'])
+ assert.equal(none.reviewStatus,'no-findings')
+ assert.equal(none.report.checks.length,0)
+ assert.notEqual(none.report.verdict,'pass')
+ assert.match(acceptanceBanner({mode:'review_result',finalReview:true,...none}),/不是完成验收/)
+ assert.equal(wrap([],[]).reviewStatus,'incomplete')
+ const unsupported=wrap([{text:'Potential defect',evidenceRefs:['read:never-read.js']}],['read:page.html'])
+ assert.equal(unsupported.reviewStatus,'incomplete')
+ assert.equal(unsupported.report.findings[0].unverified,true)
+ assert.match(unsupported.report.findings[0].text,/未核实/)
+ const supported=wrap([{text:'Important · page.html:1 · failure trigger',evidenceRefs:['read:page.html']}],['read:page.html'])
+ assert.equal(supported.reviewStatus,'findings')
+ assert.equal(wrap([],['read:page.html'],'incomplete').reviewStatus,'incomplete')
+ assert.equal(parseLiteReviewReport('not structured',[]).reviewStatus,'incomplete')
 })

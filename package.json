@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-wish-specializer",
-  "version": "0.9.1-autopilot.1",
+  "version": "0.9.1-autopilot.2",
   "private": true,
   "description": "Autopilot Dev — Wish-driven intent alignment and evidence-based Worker ↔ Advisor workflow for DSH PTC.",
   "type": "module",
@@ -41,7 +41,9 @@
     "docs/KEYWORDS.md",
     "examples/profile.patch.yml",
     "README.en.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "po06/lenses",
+    "po06/META-SUPERVISOR.md"
   ],
   "dsh": {
     "bundle": {

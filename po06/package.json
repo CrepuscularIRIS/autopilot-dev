@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-wish-specializer",
-  "version": "0.9.1-autopilot.1",
+  "version": "0.9.1-autopilot.2",
   "private": true,
   "repository": {
     "type": "git",
@@ -44,7 +44,9 @@
     "HELP-0.6.md",
     "HELP-0.6.en.md",
     "eval/HOLDOUT-v2.md",
-    "eval/HOLDOUT-v1.md"
+    "eval/HOLDOUT-v1.md",
+    "lenses",
+    "META-SUPERVISOR.md"
   ],
   "dsh": {
     "bundle": {

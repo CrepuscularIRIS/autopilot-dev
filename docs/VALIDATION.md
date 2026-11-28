@@ -1,7 +1,7 @@
-# Autopilot Dev 0.9.1-autopilot.1 — validation
+# Autopilot Dev 0.9.1-autopilot.2 — validation
 
-- `node po06/scripts/run-suites.mjs`: 149 suites / 1529 passing tests, 0 failed, exit 0.
-- Tested configurable provider/model routing, observed-session fallback, role selection when roles share a model, native independent review/investigation and the inactive-advisor boundary.
-- Isolated native DSH Desktop host: source checkout and unpacked npm artifact both load the default PTC preset, assemble the keyword-based initial Worker context, expose `consult_task`, `advisor_stage` and native subagent tools, and run the stage status tool through PTC `run_code`. No Research/Wish replacement preset.
-- `npm pack --ignore-scripts`: package contains the native bundle, client, entry, prompt playbooks and example configuration. No personal workspace, research integrations, recorded sessions, or bundled shell executables.
-- The native smoke used a synthetic workspace and did not call a remote inference provider. This does not establish model output quality across all providers, OSes or DSH versions.
+- Source regression: 152 suites / 1,570 passing assertions, zero failed, exit 0.
+- Configurable role/provider routing, generic no-card cold start, explicit project-card binding and source hashes, ten-hour Goal threshold, terminal records, native conversation view registration, and one final review.
+- Isolated native DSH host tested both the source checkout and the unpacked npm artifact without any domain library: Flash received generic lens and no domainCards; its proposal reached Worker, Sol and optional Kimi investigation independently read source using review_inspect. No paid model inference was used.
+- Actual native DSH UI tested the Wish advisors conversation tab and filter/detail expansion in the corresponding local implementation. Provider-specific output quality and production latency are not established by these fixtures.
+- npm pack includes generic lens, model configuration example, documentation, bundle and client. No personal workspace, real cards, research preset/integration, recorded sessions, or bundled shell binaries.

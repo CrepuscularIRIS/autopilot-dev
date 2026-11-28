@@ -24,6 +24,9 @@ import {
 } from './wire.js'
 import { verifyHtmlFile } from './verifier-html.js'
 import { loadLlmLib } from './llm-lib.js'
+import { createMetaSupervisor, inferMeta, META_WORKFLOW, createCollaborationLedger, mergeCollaborationRuns } from './meta-supervisor.js'
+import { createProposalStore, createLensRegistry, canQueueProposal } from './proposals.js'
+import { execFile } from 'node:child_process'
 // P10 步骤 2/3：设置里的 `historyMode`/`turns`/`readTools` 三项的**行为落地**
 // （在此之前它们只是字段，没有任何代码读——界面上摆着却是装饰品）。
 import { createSessionHistory, renderObserverBlock } from './session-context.js'
@@ -38,7 +41,6 @@ import {createInferenceEvidenceContext} from './inference-context.js'
 import {createInferenceFocus} from './inference-focus.js'
 import { createEnglishMode,protectEnglishLiterals,prepareEnglishInterpretation,finishEnglishInput,resolveEnglishInterpretation } from './english-mode.js'
 import { withAdvisorWorkflow } from './advisor-workflow.js'
-
 import { createOptimizationRuns } from './optimization-runs.js'
 import { createAdvisorFeedback } from './advisor-context.js'
 import { createAdvisorCoverage } from './advisor-coverage.js'
@@ -156,6 +158,23 @@ const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE_RESOLVED.name)
 // 插件安静地不做事，用户以为它开着。所以每次用户输入都要留一条**判定结果**，
 // 无论解释成没成。按 DSH_HOME 落盘，隔离实例的台账与日常的分开。
 const WIRE_LOG_PATH = join(DSH_HOME, 'po06-wire.jsonl')
+let collaborationLedger=null
+function collaborationHistory(){
+  if(!collaborationLedger){
+    collaborationLedger=createCollaborationLedger()
+    try{
+      const legacyNotes=new Map()
+      const key=r=>JSON.stringify([r.sessionId,r.role,r.status,r.ms,r.goalId,r.revision,r.requestId])
+      try{for(const line of readFileSync(join(DSH_HOME,'po06-supervisor-notes.jsonl'),'utf8').split('\n')){try{const r=JSON.parse(line);if(!r.runId&&r.text){const k=key(r),items=legacyNotes.get(k)||[];items.push(r.text);legacyNotes.set(k,items)}}catch{}}}catch{}
+      for(const line of readFileSync(WIRE_LOG_PATH,'utf8').split('\n')){try{
+        const r=JSON.parse(line)
+        if(r.trigger==='meta-supervisor'&&!r.runId){const notes=legacyNotes.get(key(r));if(notes?.length)r.text=notes.shift()}
+        collaborationLedger.ingest(r)
+      }catch{}}
+    }catch{}
+  }
+  return collaborationLedger
+}
 
 /**
  * 投递消息的**生产者 kind**（ADR-0087）。
@@ -177,7 +196,9 @@ const PRODUCER_KIND = 'plugin:@dsh-external/dsh-wish-specializer'
 function appendWireLog(rec) {
   try {
     mkdirSync(DSH_HOME, { recursive: true })
-    writeFileSync(WIRE_LOG_PATH, JSON.stringify({ at: new Date().toISOString(), ...rec }) + '\n',
+    const row={ at: new Date().toISOString(), ...rec }
+    collaborationLedger?.ingest(row)
+    writeFileSync(WIRE_LOG_PATH, JSON.stringify(row) + '\n',
       { encoding: 'utf8', flag: 'a' })
   } catch { /* best effort */ }
 }
@@ -276,17 +297,16 @@ const REVIEW_PROMPT = '你是独立只读子代理。只用 review_inspect 实�
 function isReviewSession(session) {
   return isSubagentSession(session) && (independentSessionId(session.id) || session.header.agentPreset === 'wish-review')
 }
-const [DEBUG_PLAYBOOK, VERIFY_PLAYBOOK, REVIEW_PLAYBOOK] = [
-  '03-systematic-debugging', '04-verification-before-completion', '05-code-review',
+const [DEBUG_PLAYBOOK, VERIFY_PLAYBOOK, REVIEW_LITE_PLAYBOOK] = [
+  '03-systematic-debugging', '04-verification-before-completion', '06-review-lite',
 ].map(name => readFileSync(new URL('../playbooks/' + name + '.md', import.meta.url), 'utf8').replace(/<!--[^]*?-->/g, '').trim())
 
-export const EXAMPLE_ADVISOR_MODELS = Object.freeze({
-  advisor: Object.freeze({provider:'litellm',model:'deepseek-v4.1-flash',reasoningEffort:'high'}),
-  worker: Object.freeze({provider:'litellm',model:'glm-5.4[1m]',reasoningEffort:'high'}),
-  review: Object.freeze({provider:'litellm',model:'gpt-6.2-sol',reasoningEffort:'high'}),
-  investigate: Object.freeze({provider:'litellm',model:'k3.1-pro',reasoningEffort:'high'}),
+export const EXAMPLE_ADVISOR_MODELS=Object.freeze({
+ advisor:Object.freeze({provider:'litellm',model:'deepseek-v4.1-flash',reasoningEffort:'high'}),
+ worker:Object.freeze({provider:'litellm',model:'glm-5.4[1m]',reasoningEffort:'high'}),
+ investigate:Object.freeze({provider:'litellm',model:'k3.1-pro',reasoningEffort:'high'}),
+ review:Object.freeze({provider:'litellm',model:'gpt-6.2-sol',reasoningEffort:'medium'})
 })
-
 // Reuse the evidence and acceptance pipeline with the native child as its report source.
 async function* streamSubagentReview(subagents, parent, childId, { system, messages, signal }, run, independentRuns) {
   signal.throwIfAborted()
@@ -303,7 +323,7 @@ async function* streamSubagentReview(subagents, parent, childId, { system, messa
     activation = await subagents.startActivation({
       provider: 'spawn',
       childId,
-      label: run.investigation ? '独立调查' : '独立代码审查',
+      label: run.investigation ? '独立调查' : 'Sol Review · Lite',
       parent,
       prompt,
       agentPreset:'standard',
@@ -326,28 +346,39 @@ async function* streamSubagentReview(subagents, parent, childId, { system, messa
   }
 }
 
-/** 发送前解释层由 Options 单独管理。 */
-export function advisorRole({mode,advisorRoute='default',taskType='general',scope,taskId,stageId,images}={}) {
-  if (!['default','architecture','review','investigate'].includes(advisorRoute)) return {ok:false,reason:'invalid-advisor-route'}
-  if (!['general','web_3d','visual','multimodal','long_horizon'].includes(taskType)) return {ok:false,reason:'invalid-advisor-task-type'}
-  if (advisorRoute==='investigate') return ['diagnose_failure','develop_approach'].includes(mode)&&taskId===undefined&&stageId===undefined
-    ? {ok:true,role:'investigate'} : {ok:false,reason:'investigation-requires-diagnosis-or-approach'}
-  if (advisorRoute==='review'&&mode!=='review_result') return {ok:false,reason:'advisor-route-requires-review'}
-  if (mode==='review_result') {
-    if (advisorRoute==='review'&&scope==='general'&&taskId===undefined&&stageId===undefined) return {ok:true,role:'review'}
-    if (taskId!==undefined||stageId!==undefined||taskType==='long_horizon') return {ok:true,role:'worker'}
-  }
-  return {ok:true,role:VISUAL_SCOPES.has(scope)||(Array.isArray(images)&&images.length>0)?'worker':'advisor'}
+/** Retire routine model verification; old whole-Goal verify means one final review. */
+export function normalizeFinalReviewRequest(args={}) {
+  if ((args.entry===undefined?args.mode==='review_result':args.entry==='verify') && args.taskType==='long_horizon'
+      && (!args.advisorRoute||['default','architecture'].includes(args.advisorRoute))
+      && (args.scope===undefined||args.scope==='general') && args.taskId===undefined && args.stageId===undefined)
+    return {...args,advisorRoute:'review',scope:'general'}
+  return args
 }
+const localVerification = () => ({ok:false,reason:'local-verification-only',note:'GLM 主会话直接执行测试、核对证据和完整 Goal，不再发起阶段/重复核验。完整非平凡代码任务交付前仅调用一次 consult_task(advisorRoute="review",scope="general")。历史阶段台账保留，不视本返回为通过。'})
 
-export function resolveAdvisorModelRoute(args={}, {models=EXAMPLE_ADVISOR_MODELS, observed, effortByModel}={}) {
-  const selection=advisorRole(args)
-  if(!selection.ok)return selection
-  const route=models?.[selection.role] ?? observed
-  if(!route||typeof route.provider!=='string'||!route.provider.trim()||typeof route.model!=='string'||!route.model.trim())
-    return {ok:false,reason:'no-advisor-model-route',role:selection.role}
+/** 发送前解释层由 Options 单独管理。 */
+export function advisorRole(input={}, {legacyStageReviews=false}={}) {
+  const {mode,advisorRoute='default',taskType='general',scope,taskId,stageId,images}=legacyStageReviews?input:normalizeFinalReviewRequest(input)
+  if(!['default','architecture','review','investigate'].includes(advisorRoute))return{ok:false,reason:'invalid-advisor-route'}
+  if(!['general','web_3d','visual','multimodal','long_horizon'].includes(taskType))return{ok:false,reason:'invalid-advisor-task-type'}
+  if(advisorRoute==='investigate')return ['diagnose_failure','develop_approach'].includes(mode)&&taskId===undefined&&stageId===undefined?{ok:true,role:'investigate'}:{ok:false,reason:'investigation-requires-diagnosis-or-approach'}
+  if(advisorRoute==='review'&&mode!=='review_result')return{ok:false,reason:'advisor-route-requires-review'}
+  if(mode==='review_result'){
+    if(advisorRoute==='review'&&scope==='general'&&taskId===undefined&&stageId===undefined)return{ok:true,role:'review'}
+    if(!legacyStageReviews)return localVerification()
+    if(taskId!==undefined||stageId!==undefined||taskType==='long_horizon')return{ok:true,role:'worker'}
+  }
+  const visual=VISUAL_SCOPES.has(scope)||(Array.isArray(images)&&images.length>0)
+  if(visual&&!legacyStageReviews&&Array.isArray(images)&&images.length)return{ok:false,reason:'local-visual-analysis-only',note:'The Worker inspects images directly; use text observations for advice.'}
+  return{ok:true,role:visual&&legacyStageReviews?'worker':'advisor'}
+}
+export function resolveAdvisorModelRoute(args={}, {models=EXAMPLE_ADVISOR_MODELS,observed,effortByModel,legacyStageReviews=false}={}){
+  const selected=advisorRole(args,{legacyStageReviews})
+  if(!selected.ok)return selected
+  const route=models?.[selected.role]??observed
+  if(!route||typeof route.provider!=='string'||!route.provider.trim()||typeof route.model!=='string'||!route.model.trim())return{ok:false,reason:'no-advisor-model-route',role:selected.role}
   const effort=route.reasoningEffort??effortByModel?.[route.provider+'/'+route.model]
-  return {ok:true,provider:route.provider,model:route.model,...(typeof effort==='string'&&effort?{reasoningEffort:effort}:{})}
+  return{ok:true,provider:route.provider,model:route.model,...(typeof effort==='string'&&effort?{reasoningEffort:effort}:{})}
 }
 
 /** `readTools` 该不该真的派工具。**纯函数**（便于定点核对"关掉开关时零工具调用"）。 */
@@ -985,6 +1016,7 @@ async function runProductionInput(ctx, session, message, { trigger = 'user-messa
         // 不记的话，"这一轮解析不到 cwd"的会话会在整条会话里永远用不上工具。
         if (cwd) sessionHistory.setCwd(sessionId, cwd)
         const tools = readToolsFor({ readTools: pol.readTools, cwd: cwd || sessionHistory.getCwd(sessionId) })
+        if((adapter.presetOf(sessionId)||session?.header?.agentPreset)==='ptc' && pluginConfig.metaSupervisor===true)tools.count=2
         const promptStarted = Date.now()
         const protocol = await buildInterpreterProtocol({ englishMode: pol.englishMode, llm, cfg, signal: message.signal || null, home: DSH_HOME, toolsEnabled: tools.enabled, strategy: pol.strategy })
         const sys = protocol.text
@@ -1380,6 +1412,8 @@ async function runInterceptInput(ctx, payload) {
   const live = () => adapter.optimizationRuns.isCurrent(run)
   const progress = patch => { if (live()) progressSet(sid, { ...patch, runId: messageId, startedAt }) }
   progress({ stage: 'gate', text: '', reasoning: '', textChars: 0, reasoningChars: 0, usage: null })
+  appendWireLog({sessionId:sid,runId:messageId,trigger:'intercept-start',model:run.policy.model?.model||null})
+  let interceptSettled=false
   try {
     const gate = run.policy.injectPacket ? await awaitGateDecision(sid, 25000) : PENDING
     timings.gateMs = Date.now() - startedAt
@@ -1427,7 +1461,8 @@ async function runInterceptInput(ctx, payload) {
     if (!adapter.optimizationRuns.finish(run, result)) return { ok: false, runId: messageId, reason: 'superseded-input' }
     if (translation) { adapter.english.record(englishToken, translation.text, translation); adapter.capability.bindTranslation(sid, translation.text) }
     progress({ stage: packet ? 'done' : 'noop' })
-    appendWireLog({ sessionId: sid, runId: messageId, trigger: 'intercept-result', ok: true, status: result.status, ms: result.ms, timings: result.timings, packetChars: packet.length })
+    interceptSettled=true
+    appendWireLog({ sessionId: sid, runId: messageId, trigger: 'intercept-result', ok: true, status: result.status, ms: result.ms, timings: result.timings, packetChars: packet.length, summary:packet.slice(0,6500) })
     return result
   } catch (error) {
     const reason = String(error?.message || error)
@@ -1435,8 +1470,11 @@ async function runInterceptInput(ctx, payload) {
     const englishAttempts = Array.isArray(error?.attempts) ? error.attempts : null
     const result = { ok: false, timings: { ...timings }, status: signal.aborted ? 'aborted' : 'failed', runId: messageId, reason, packet: '', chars: 0, ms: Date.now() - startedAt, ...(englishAttempts ? { englishAttempts } : {}) }
     if (live()) { adapter.optimizationRuns.finish(run, result); progress({ stage: 'failed', reason }) }
-    appendWireLog({ sessionId: sid, runId: messageId, trigger: 'intercept-result', ok: false, reason, timings: result.timings, ...(englishAttempts ? { englishAttempts } : {}) })
+    interceptSettled=true
+    appendWireLog({ sessionId: sid, runId: messageId, trigger: 'intercept-result', ok: false, reason, ms:result.ms, timings: result.timings, ...(englishAttempts ? { englishAttempts } : {}) })
     return result
+  } finally {
+    if(!interceptSettled)appendWireLog({sessionId:sid,runId:messageId,trigger:'intercept-result',ok:false,status:'cancelled',reason:'superseded-or-aborted',ms:Date.now()-startedAt})
   }
 }
 
@@ -2057,7 +2095,7 @@ class DshAdapter {
                 this.capability.seed(session)
                 const taskContext=this.capability.taskContext(session)
                 const feedback = this.reviewFeedback ? this.reviewFeedback(agent, pol, { root: sessionHistory.getCwd(sid), taskContext }) : ''
-                return [withAdvisorWorkflow(this.getWorkingText(sid, adapter.lastRealUserMessageBySession.get(sid)), pol, this.getAdvisorText(sid, feedback), ''), modelStateText].filter(Boolean).join(String.fromCharCode(10,10))
+                return [withAdvisorWorkflow(this.getWorkingText(sid, adapter.lastRealUserMessageBySession.get(sid)), pol, this.getAdvisorText(sid, feedback), '', pluginConfig.metaSupervisor===true && (adapter.presetOf(sid)||session?.header?.agentPreset)==='ptc' ? META_WORKFLOW : undefined), modelStateText].filter(Boolean).join(String.fromCharCode(10,10))
               } catch (e) {
                 // ⚠ **不得静默**（EV-0102）：这条路径若抛错，意图包会在**毫无痕迹**的情况下消失——
                 // 正是 EV-0078 那一类事故（产品安静地不做事，用户以为它开着）。
@@ -2196,6 +2234,87 @@ export function apply(ctx, config) {
   pluginConfig = config && typeof config === 'object' ? config : {}
   ctx.effect(() => () => adapter.capability.dispose(), 'dsh-arbiter: capability lifecycle')
   const advisorProgress = createAdvisorProgress({ home: DSH_HOME })
+  let metaSupervisor=null,proposalDecision=null
+  const proposalStore=createProposalStore({path:join(DSH_HOME,'po06-proposals.jsonl')})
+  const lensRegistry=createLensRegistry({path:join(DSH_HOME,'po06-lenses.json')})
+  if(pluginConfig.metaSupervisor===true) ctx.inject(['llm'],scope=>{
+    const eligible=session=>{
+      if(!session?.id||isSubagentSession(session))return false
+      const sid=String(session.id),preset=adapter.presetOf(sid)||session.header?.agentPreset
+      const pol=readPolicy({home:DSH_HOME,sessionId:sid})
+      return preset==='ptc'&&pol.injectPacket===true&&pol.advisor!==false&&adapter.enableGate?.ensure(sid)?.enabled===true
+    }
+    const supervisor=createMetaSupervisor({
+      enabled:eligible,infer:args=>inferMeta(scope.llm,args),store:proposalStore,lenses:lensRegistry,
+      routeFor:(session,role)=>{
+        const sid=String(session.id),models=pluginConfig.advisorModels||{}
+        const agent=adapter.agentFor(sid)
+        const route=models[role==='kimi'?'investigate':'advisor']|| (agent?.options?.provider&&agent?.options?.model?agent.options:ownModelFor(sid)||modelFor(sid))
+        if(!route?.provider||!route?.model)return null
+        return {provider:route.provider,model:route.model,reasoningEffort:route.reasoningEffort|| (role==='kimi'?'high':'medium')}
+      },
+      ...Object.fromEntries(['flashEvery','flashMs','flashFirst','flashGap'].filter(k=>Number.isSafeInteger(pluginConfig.proposalFrequency?.[k])&&pluginConfig.proposalFrequency[k]>0).map(k=>[k,pluginConfig.proposalFrequency[k]])),
+      notify:({kind,sessionId,items})=>{
+        appendWireLog({trigger:'proposal-notification',sessionId,kind,count:items.length})
+        // Linux desktop service; no shell interpolation and no raw model markup. UI pool remains available on all hosts.
+        if(pluginConfig.proposalNotifications!==false&&process.platform==='linux'&&existsSync('/usr/bin/notify-send')){
+          const title=kind==='proposal'?'Wish · 新的专业方向':'Wish · 本轮提议汇总'
+          const body=items.map(x=>x.topic+' ['+x.id+']').join('\n').slice(0,1200)+'\nOptions → 详情 → DS 提议'
+          execFile('/usr/bin/notify-send',['-a','DSH Wish Specializer','--',title,body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')],{timeout:5000},err=>{
+            if(err)appendWireLog({trigger:'proposal-notification',sessionId,kind,ok:false,reason:'desktop-notification-unavailable'})
+          })
+        }
+      },
+      restore:sid=>{
+        try{return readFileSync(join(DSH_HOME,'po06-supervisor-notes.jsonl'),'utf8').split('\n').flatMap(line=>{
+          try{const row=JSON.parse(line);return row.sessionId===sid?[row]:[]}catch{return []}
+        })}catch{return []}
+      },
+      log:row=>{
+        const {text,...metadata}=row
+        appendWireLog({trigger:'meta-supervisor',...metadata})
+        if(text||row.status==='start')try{appendFileSync(join(DSH_HOME,'po06-supervisor-notes.jsonl'),JSON.stringify(row)+'\n',{mode:0o600})}catch{}
+      },
+    })
+    metaSupervisor=supervisor
+    let createNotice=null
+    proposalDecision=({sessionId,id,decision})=>{
+      const row=proposalStore.list(sessionId).find(x=>x.id===id)
+      if(!row)return{ok:false,reason:'proposal-not-found'}
+      const result=proposalStore.status(sessionId,id,decision)
+      if(!result.ok||decision!=='accepted')return result
+      const agent=adapter.agentFor(sessionId)
+      const events=agent?.session?.snapshotEvents?.()||[]
+      const activeGoal=nativeGoalContext(events)
+      const lastHuman=events.findLast(isRealUserInput)
+      const lastGoalChange=events.findLast(e=>e.type==='goal/change')
+      const goalAfterRequest=!!lastGoalChange?.data?.goal&&(!lastHuman||lastGoalChange.seq>lastHuman.seq)
+      if(!agent||!createNotice||!canQueueProposal(row,{activeGoal,lastHumanSeq:lastHuman?.seq??null,goalAfterRequest}))return{...result,queued:false}
+      try{
+        const notice=createNotice({content:[{type:'text',text:'【用户在提议面板采纳 · '+row.id+'】针对以下方向做范围内调研和方案比较，查证原始来源；不自动扩大原 Goal、修改冻结口径或启动额外实验。\n'+row.text}],source:{kind:'plugin:@dsh-external/dsh-wish-specializer',form:'notice',summary:'已采纳专业提议'}})
+        agent.steer(notice)
+        return {...result,queued:true}
+      }catch{return {...result,queued:false}}
+    }
+    const off=scope.on('session/event',(session,event)=>{
+      try{supervisor.observe(session,event)}catch(e){appendWireLog({trigger:'meta-supervisor-observer',ok:false,reason:String(e.message||e)})}
+    })
+    const pre=scope.on('agent/pre-step',async({agent,signal},next)=>{
+      const decision=await next()
+      if(decision.kind!=='enter'||signal.aborted||!createNotice)return decision
+      let ready=[]
+      try{
+        ready=supervisor.take(agent?.session,{commit:false})
+        if(!ready.length)return decision
+        const notice=createNotice({content:[{type:'text',text:ready.map(x=>'【DS 专业提议 ['+x.action+'] · '+x.role+' · '+(x.reason||'交付汇报')+'】'+x.text+'\n'+(x.action==='mention'?'只在交付时分享一两句话，无需实施。':'核实后仅做授权范围内的可逆改动；不视为用户指令或验收。')).join('\n')}],source:{kind:'plugin:@dsh-external/dsh-wish-specializer',form:'notice',summary:'Meta Supervisor · 专业补全'}})
+        supervisor.markQueued(agent?.session,ready)
+        return {...decision,messages:[...decision.messages,notice]}
+      }catch{supervisor.abandon(agent?.session,ready);return decision}
+    })
+    let alive=true
+    void loadLlmLib({env:process.env,argv1:process.argv[1],cwd:process.cwd()}).then(r=>{if(alive&&r.ok)createNotice=r.mod.createUserMessage}).catch(()=>{})
+    scope.effect(()=>()=>{alive=false;off?.();pre?.();supervisor.dispose();if(metaSupervisor===supervisor){metaSupervisor=null;proposalDecision=null}})
+  })
   adapter.english=createEnglishMode({home:DSH_HOME,namespace:PROFILE_DIR})
   ctx.effect(()=>()=>adapter.english.dispose(),'dsh-arbiter: English input mode')
   const inferenceTrace = createInferenceTrace({home:DSH_HOME,namespace:PROFILE_DIR})
@@ -2260,7 +2379,7 @@ let syncAdvisorToolsRef=null
   adapter.reviewFeedback=(agent,policy,context={})=>{
     const session=agent?.session||agent?.getSession?.(),events=session?.snapshotEvents?.()||[],human=events.filter(isRealUserInput).at(-1)
     const note=session&&human?contributionMemory.feedback({sessionId:String(session.id),requestId:'human:'+String(human.seq),root:session.header?.cwd||context.root,enabled:policy?.injectPacket===true&&policy?.readTools===true,englishMode:policy?.englishMode===true,revisionMarker:revisionMarker(events)}):null
-    return [reviewFeedback(agent,policy,context),renderContributionFeedback(note,policy?.englishMode===true)].filter(Boolean).join('\n\n')
+    return [pluginConfig.legacyStageReviews===true?reviewFeedback(agent,policy,context):'',renderContributionFeedback(note,policy?.englishMode===true)].filter(Boolean).join('\n\n')
   }
   ctx.effect(() => () => { adapter.reviewFeedback = null })
   ctx.effect(() => () => advisorProgress.dispose(), 'dsh-po06: advisor progress')
@@ -2307,11 +2426,13 @@ let syncAdvisorToolsRef=null
         if (isSubagentSession(session) && pol.applyToSubagents !== true) return { ok: false, reason: 'subagent-skip' }
         const gate = await awaitGateDecision(sid)
         if (gate?.enabled !== true) return { ok: false, reason: 'advisor-gate-disabled:' + String(gate?.code || 'pending') }
-        const role = advisorRole(args)
-        const cfg = resolveAdvisorModelRoute(args,{models:pluginConfig.advisorModels||{},observed:exec.agent?.options?.provider&&exec.agent?.options?.model?exec.agent.options:ownModelFor(sid),effortByModel:pol.effortByModel})
+            const legacyStageReviews=pluginConfig.legacyStageReviews===true
+        const role=advisorRole(args,{legacyStageReviews})
+        const cfg=resolveAdvisorModelRoute(args,{models:pluginConfig.advisorModels||{},observed:exec.agent?.options?.provider&&exec.agent?.options?.model?exec.agent.options:ownModelFor(sid),effortByModel:pol.effortByModel,legacyStageReviews})
         if (!cfg.ok) return cfg
-        const finalReview = role.role === 'review'
-        const investigation = role.role === 'investigate'
+        const finalReview = role.role==='review'
+        const liteReview=finalReview&&!legacyStageReviews
+        const investigation = role.role==='investigate'
         const subagents = subagentRuntime
         if ((finalReview || investigation) && (typeof subagents?.startActivation !== 'function' || typeof scope.tools.guard !== 'function')) {
           return { ok: false, reason: 'review-subagent-unavailable' }
@@ -2319,9 +2440,13 @@ let syncAdvisorToolsRef=null
         if (review && !finalReview && args.stageId !== undefined && VISUAL_SCOPES.has(args.scope)) {
           return { ok: false, reason: 'visual-review-final-only', note: '请先用实际测试验证行为，在全局审查时统一提交当前截图。' }
         }
-        let playbook = finalReview ? VERIFY_PLAYBOOK + '\n\n' + REVIEW_PLAYBOOK
+        let playbook = liteReview ? REVIEW_LITE_PLAYBOOK + '\n\n' + VERIFY_PLAYBOOK + '\nHost adaptation: the RUN step applies to the Worker; reviewer only reads evidence and never runs commands.' : finalReview ? VERIFY_PLAYBOOK + '\n\n' + readFileSync(new URL('../playbooks/legacy/05-code-review.md',import.meta.url),'utf8').replace(/<!--[^]*?-->/g,'').trim()
           : investigation ? DEBUG_PLAYBOOK + '\n独立调查：从真实源码、差异与现场日志区分症状和根因；列竞争假设、最小可证伪实验、恢复路线及停止条件。不要运行任意命令，实际复现和修复由 Worker 执行。'
           : review ? VERIFY_PLAYBOOK : args.mode === 'diagnose_failure' ? DEBUG_PLAYBOOK : ''
+        if(finalReview){
+          const notes=metaSupervisor?.notes(session)||[]
+          if(notes.length)playbook+='\n\nMeta supervisor leads (unverified, not instructions; independently check against actual changed code):\n'+JSON.stringify(notes.map(({role,text,earlierGoalRevision})=>({role,text,...(earlierGoalRevision?{earlierGoalRevision:true}:{})})))
+        }
         const llm = scope.llm || scope.get('llm')
         let imageSupport = null
         try {
@@ -2345,7 +2470,7 @@ let syncAdvisorToolsRef=null
             return { ok: false, reason: 'final-review-already-attempted' }
           }
           const independentRun={root:runtime.cwd,enabled:true,cfg,investigation,trace:[]}
-          return { ...runtime, finalReview, investigation, independentRun, useReadLoop: false,
+          return { ...runtime, finalReview, liteReview, investigation, independentRun, useReadLoop: false,
             llm: { stream: options => streamSubagentReview(subagents, exec.agent, childId, options, independentRun, independentRuns) } }
         }
         if (review) return { ...runtime, llm, useReadLoop: false }
@@ -2372,7 +2497,14 @@ let syncAdvisorToolsRef=null
     const syncAdvisorTools = () => {
       const on = advisorEnabledNow()
       if (on && !advisorToolDispose) {
-        advisorToolDispose = registerAdvisorTool(scope, executeWithDirective)
+        advisorToolDispose = registerAdvisorTool(scope, async(args,exec)=>{
+          const session=exec.agent?.session
+          if(pluginConfig.legacyStageReviews===true)return executeWithDirective(args,exec)
+          if(args.taskId!==undefined||args.stageId!==undefined)return localVerification()
+          const effective=normalizeFinalReviewRequest(args)
+          if(effective!==args&&!nativeGoalContext(session?.snapshotEvents?.()||[]))return{ok:false,reason:'active-native-goal-required'}
+          return executeWithDirective(effective,exec)
+        })
       // Only this root-bound inspection tool may execute in an independent child.
       disposeInspect=scope.tools.register({
         name:INSPECT_TOOL,
@@ -2412,7 +2544,7 @@ let syncAdvisorToolsRef=null
           }
         }
       })
-      const disposeStages = registerAdvisorStageTool(scope, advisorStages, {
+      const disposeStages = pluginConfig.legacyStageReviews===true ? registerAdvisorStageTool(scope, advisorStages, {
         resolveAccess: async session => {
           const sid = String(session.id)
           const pol = readPolicy({ home: DSH_HOME, sessionId: sid })
@@ -2422,14 +2554,12 @@ let syncAdvisorToolsRef=null
           if (gate?.enabled !== true) return { ok: false, reason: 'advisor-gate-disabled' }
           return { ok: true, readTools: pol.readTools === true }
         },
-      })
+      }) : ()=>{}
       return () => {
         execute.dispose()
         try { if (typeof advisorToolDispose === 'function') advisorToolDispose() } catch { /* 已注销 */ }
         try { disposeReviewGuard?.() } catch { /* 已注销 */ }
         try { disposeInspect?.() } catch { /* 已注销 */ }
-        try { disposeResearch?.() } catch { /* 已注销 */ }
-        try { disposeStageRead?.();disposeStageWrite?.() } catch { /* 已注销 */ }
         independentRuns.clear()
         try { disposeStages() } catch { /* 已注销 */ }
         advisorToolDispose = null
@@ -2552,7 +2682,11 @@ let syncAdvisorToolsRef=null
       try {
         adapter.controlApiDisposer = registerControlApi({ webServer: scope.webServer }, {
           home: DSH_HOME, version: PKG_VERSION, now: () => Date.now(),
-           capabilityStatus: sid => ({...adapter.capability.status(sid),moduleUrl:import.meta.url,pipelineRevision:'single-run-1',features:['transport-retry','tool-result-continuation','independent-investigation-1','portable-advisor-roles-1'],optimization:sid ? (()=>{const run=adapter.optimizationRuns.get(sid);return run?{runId:run.runId,generation:run.generation,status:run.status,packetChars:adapter.optimizationRuns.packet(sid).length}:null})() : null}),
+          collaborationRuns:sid=>mergeCollaborationRuns(collaborationHistory().list(sid),advisorProgress.list(sid)),
+          proposals:sid=>proposalStore.list(sid).filter(x=>x.action!=='note'),
+          proposalDecision:args=>proposalDecision?.(args)||{ok:false,reason:'proposal-engine-disabled'},
+          lensList:()=>lensRegistry.list(),lensSearch:q=>({domains:lensRegistry.search(q),drafts:lensRegistry.searchDrafts(q)}),lensCards:(cwd,q)=>lensRegistry.readCards({header:{cwd}},q),lensImport:args=>lensRegistry.importLens(args),lensBind:args=>lensRegistry.bind(args),
+           capabilityStatus: sid => ({...adapter.capability.status(sid),moduleUrl:import.meta.url,pipelineRevision:'single-run-1',features:['transport-retry','tool-result-continuation','independent-investigation-1','one-final-review-1',...(metaSupervisor?['meta-supervisor-1','proposal-engine-1','lens-registry-1']:[]),'sol-review-lite-1'],optimization:sid ? (()=>{const run=adapter.optimizationRuns.get(sid);return run?{runId:run.runId,generation:run.generation,status:run.status,packetChars:adapter.optimizationRuns.packet(sid).length}:null})() : null}),
            optimizerStatus: sid => sid ? optimizerRequests.get(String(sid)) || null : null,
           // P11：前置拦截的按需解释（客户端拦下发送后调它；失败即由客户端按原文放行）
           interpret: (p) => runInterceptInput(ctx, p),
